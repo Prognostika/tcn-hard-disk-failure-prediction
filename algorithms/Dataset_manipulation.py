@@ -308,29 +308,25 @@ def filter_HDs_out(df, min_days, time_window, tolerance):
 	
 	"""
 	pcts = df.notna().sum() / df.shape[0] * 100
-	cols = pcts < 45.0 # identify columns to remove True / False
-	cols = cols[list(cols)] # select column names with 'True' value
-	cols = cols[list(cols)].reset_index()
-	cols = list(cols['index']) # generate a list of column names to remove
+    # Identify columns to remove True / False, select column names with 'True' value, generate a list of column names to remove
+	cols = list(pcts[pcts < 45.0].index)
 	df.drop(cols, axis=1, inplace=True) # drop columns
 	df = df.dropna()
 	bad_power_hds = []
-	for serial_num, inner_df in df.groupby(level=0): # identify HDs with too few power-on days.
-		if len(inner_df) < min_days:
-			bad_power_hds.append(serial_num)
-		else:
-			pass
-        
 	bad_missing_hds = []
-	for serial_num, inner_df in df.groupby(level=0): # indentify HDs with too many missing values.
+
+    # Loop over each group in the DataFrame, grouped by the first level of the index (serial number)
+	for serial_num, inner_df in df.groupby(level=0):
+		if len(inner_df) < min_days:  # identify HDs with too few power-on days
+			bad_power_hds.append(serial_num)
+
 		inner_df = inner_df.droplevel(level=0)
 		inner_df = inner_df.asfreq('D')
 		n_missing = max(inner_df.isna().rolling(time_window).sum().max())
 
-		if n_missing >= tolerance:
+		if n_missing >= tolerance:  # identify HDs with too many missing values
 			bad_missing_hds.append(serial_num)
-		else:
-			pass
+
 	bad_hds = set(bad_missing_hds + bad_power_hds)
 	hds_remove = len(bad_hds)
 	hds_total = len(df.reset_index().serial_number.unique())
@@ -345,7 +341,7 @@ def filter_HDs_out(df, min_days, time_window, tolerance):
 	print('{} failed'.format(num_fail))
 	print('{} did not fail'.format(num_not_fail))
 	print('{:5f}% failed'.format(pct_fail))
-	return bad_missing_hds, bad_power_hds,df
+	return bad_missing_hds, bad_power_hds, df
 
 def interpolate_ts(df, method='linear'):
     
