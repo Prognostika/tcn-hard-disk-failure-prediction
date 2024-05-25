@@ -478,8 +478,21 @@ class DatasetPartitioner:
     """
         https://github.com/Prognostika/tcn-hard-disk-failure-prediction/wiki/Code_Process#partition-dataset-subflowchart
     """
-    def __init__(self, df, model, overlap=0, rank='None', num_features=10, technique='random',
-                 test_train_perc=0.2, windowing=1, window_dim=5, resampler_balancing=5, oversample_undersample=0):
+
+    def __init__(
+        self,
+        df: pd.DataFrame,
+        model: str,
+        overlap: int = 0,
+        rank: str = "None",
+        num_features: int = 10,
+        technique: str = "random",
+        test_train_perc: float = 0.2,
+        enable_windowing: bool = True,
+        window_dim: int = 5,
+        resampler_balancing: int = 5,
+        oversample_undersample: int = 0,
+    ):
         """
         Initialize the DatasetPartitioner object.
         

@@ -117,7 +117,7 @@ if __name__ == '__main__':
     # Correct years for the model
     years = ['2013', '2014', '2015', '2016', '2017']
     # many parameters that could be changed, both for unbalancing, for networks and for features.
-    windowing = 1
+    windowing = True
     min_days_HDD = 115
     # TODO: Can be adjusted by dynamic parameters
     days_considered_as_failure = 7
@@ -168,7 +168,7 @@ if __name__ == '__main__':
         print('Used features')
         for column in list(df):
             print('{:.<27}'.format(column,))
-        print('Saving to pickle file...')
+        # print('Saving to pickle file...')
         #df.to_pickle(os.path.join(script_dir, '..', 'output', f'{model}_Dataset_windowed_{history_signal}_rank_{ranking}_{num_features}_overlap_{overlap}.pkl'))
 
     ## -------- ##
@@ -184,7 +184,7 @@ if __name__ == '__main__':
         num_features=num_features,
         technique='random',
         test_train_perc=test_train_perc,
-        windowing=windowing,
+        enable_windowing=windowing,
         window_dim=history_signal,
         resampler_balancing=balancing_normal_failed,
         oversample_undersample=oversample_undersample
