@@ -65,7 +65,6 @@ def classification(X_train, Y_train, X_test, Y_test, classifier, **args):
     """
     logger.info(f'Classification using {classifier} is starting')
 
-    n_iterations = 100
     if classifier == 'RandomForest':
         # Step 1.7.1: Perform Classification using RandomForest.
         try:
@@ -1296,14 +1295,16 @@ def initialize_classification(*args):
         logger.info('Used features')
         for column in list(df):
             logger.info(f'{column:<27}.')
+
+        # Step 1.5: Save the dataset to a pickle file
         logger.info(f'Saving to pickle file: {model_string}_Dataset_selected_windowed_{history_signal}_rank_{ranking}_{num_features}_overlap_{overlap}.pkl')
         df.to_pickle(os.path.join(output_dir, f'{model_string}_Dataset_selected_windowed_{history_signal}_rank_{ranking}_{num_features}_overlap_{overlap}.pkl'))
 
-    # Interpolate data for the rows with missing dates
+    # Step 2: Interpolate data for the rows with missing dates
     if interpolate_technique != 'None':
         df = interpolate_ts(df, method=interpolate_technique)
 
-    if manufacturer != 'custom' and partition_models == True:
+    if manufacturer != 'custom' and partition_models:
         relevant_models, irrelevant_models = find_relevant_models(df)
         # Filter the original DataFrame based on the 'model' column
         relevant_df = df[df['model'].isin(relevant_models)]
@@ -1319,8 +1320,8 @@ def initialize_classification(*args):
         search_method, enable_tuning, fillna_method, pca_components, smoothing_level, max_wavelet_scales
     )
 
-    if transfer_learning:
-        if partition_models == True:
+    if partition_models:
+        if transfer_learning:
             # Partition the dataset into training and testing sets for the relevant_df
             Xtrain, ytrain, Xtest, ytest = initialize_partitioner(
                 relevant_df, output_dir, model_string, windowing, test_train_perc, 
@@ -1344,38 +1345,6 @@ def initialize_classification(*args):
                 overlap, split_technique, fillna_method, pca_components, smoothing_level,
                 apply_weighted_feature, feature_weights, max_wavelet_scales
             )
-
-            # Perform classification for the irrelevant_df
-            return perform_classification(Xtrain, ytrain, Xtest, ytest, id_number, 
-                classifier, CUDA_DEV, search_method, enable_tuning, incremental_learning, True,
-                launch_dashboard, param_path
-            )
-        else:
-            # Partition the dataset into training and testing sets for the irrelevant_df
-            Xtrain, ytrain, Xtest, ytest = initialize_partitioner(
-                df, output_dir, model_string, windowing, test_train_perc, 
-                oversample_undersample, balancing_normal_failed, history_signal, 
-                classifier, features_extraction_method, ranking, num_features, 
-                overlap, split_technique, fillna_method, pca_components, smoothing_level,
-                apply_weighted_feature, feature_weights, max_wavelet_scales
-            )
-
-            # Perform classification for the irrelevant_df
-            return perform_classification(Xtrain, ytrain, Xtest, ytest, id_number, 
-                classifier, CUDA_DEV, search_method, enable_tuning, incremental_learning, True,
-                launch_dashboard, param_path
-            )
-    else:
-        if partition_models == False:
-            # Partition the dataset into training and testing sets for entire df
-            Xtrain, ytrain, Xtest, ytest = initialize_partitioner(
-                df, output_dir, model_string, windowing, test_train_perc, 
-                oversample_undersample, balancing_normal_failed, history_signal, 
-                classifier, features_extraction_method, ranking, num_features, 
-                overlap, split_technique, fillna_method, pca_components, smoothing_level,
-                apply_weighted_feature, feature_weights, max_wavelet_scales
-            )
-
         else:
             # Partition the dataset into training and testing sets for relevant_df
             Xtrain, ytrain, Xtest, ytest = initialize_partitioner(
@@ -1385,12 +1354,20 @@ def initialize_classification(*args):
                 overlap, split_technique, fillna_method, pca_components, smoothing_level,
                 apply_weighted_feature, feature_weights, max_wavelet_scales
             )
-
-        # Perform classification for the relevant_df
-        return perform_classification(Xtrain, ytrain, Xtest, ytest, id_number, 
-            classifier, CUDA_DEV, search_method, enable_tuning, incremental_learning, False,
-            launch_dashboard, param_path
+    else:
+        # Partition the dataset into training and testing sets for entire df
+        Xtrain, ytrain, Xtest, ytest = initialize_partitioner(
+            df, output_dir, model_string, windowing, test_train_perc, 
+            oversample_undersample, balancing_normal_failed, history_signal, 
+            classifier, features_extraction_method, ranking, num_features, 
+            overlap, split_technique, fillna_method, pca_components, smoothing_level,
+            apply_weighted_feature, feature_weights
         )
+
+    # Perform classification for the relevant_df
+    return perform_classification(Xtrain, ytrain, Xtest, ytest, id_number, 
+        classifier, CUDA_DEV, search_method, enable_tuning, incremental_learning, transfer_learning, param_path
+    )
 
 def apply_feature_weights(data, feature_weights):
     """
