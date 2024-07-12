@@ -1,9 +1,7 @@
-import pandas as pd
+# import pandas as pd
+import modin.pandas as pd
 import numpy as np
-import math
-import pickle
 import os
-import matplotlib.pyplot as plt
 import glob
 from sklearn.linear_model import LinearRegression
 from sklearn.preprocessing import MinMaxScaler
@@ -13,264 +11,45 @@ from imblearn.over_sampling import SMOTE
 import scipy
 import scipy.stats
 import re
-import dask.dataframe as dd
 from collections import Counter
 import logger
 from tqdm import tqdm
 from GeneticFeatureSelector import GeneticFeatureSelector
-from hmmlearn import hmm
+from scipy.stats import skew
 from imblearn.pipeline import Pipeline
 from sklearn.decomposition import PCA
+from scipy.stats import pearsonr
+from sklearn.metrics import pairwise_distances
+from statsmodels.tsa.holtwinters import ExponentialSmoothing
+from scipy.special import rel_entr
+import pywt
+from numpy.linalg import matrix_rank
+import dask.dataframe as dd
 
 
-def plot_feature(dataset):
-    """
-    Plots a scatter plot of a specific feature in the dataset.
-
-    Parameters:
-    - dataset (dict): A dictionary containing the dataset with keys 'X' and 'Y'.
-
-    Returns:
-    - None
-    """
-    X = dataset['X']
-    Y = dataset['Y']
-    feat = X[:,10]
-    np.arange(len(feat))
-    fig,ax = plt.subplots()
-    ax.scatter(np.arange(len(feat[Y==0])),feat[Y==0], color ='C0', label='good HDD')
-    ax.scatter(np.arange(len(feat[Y==0]),len(feat)),feat[Y==1],color ='C1',label='failed HDD')
-    ax.set_ylabel('SMART feature [#]', fontsize=14, fontweight='bold', color = 'C0')
-    ax.set_xlabel('time points / hdd', fontsize=14, fontweight='bold')
-    legend_properties = {'weight':'bold'}
-    plt.legend(fontsize=12, prop = legend_properties)
-    plt.show()
-
-def plot_hdd(X, fail, prediction):
-    """
-    Plots the SMART features of a hard disk drive (HDD) over time.
-
-    Parameters:
-    X (numpy.ndarray): The input array containing the SMART features of the HDD.
-    fail (int): The failure status of the HDD (1 for failed, 0 for good).
-    prediction (str): The predicted status of the HDD.
-
-    Returns:
-    None
-    """
-    fig, ax = plt.subplots()
-    features = {
-        'total_features': [
-            'date',
-            'failure',
-            'smart_1_normalized',
-            'smart_5_normalized',
-            'smart_5_raw',
-            'smart_7_normalized',
-            'smart_9_raw',
-            'smart_12_raw',
-            'smart_183_raw',
-            'smart_184_normalized',
-            'smart_184_raw',
-            'smart_187_normalized',
-            'smart_187_raw',
-            'smart_189_normalized',
-            'smart_193_normalized',
-            'smart_193_raw',
-            'smart_197_normalized',
-            'smart_197_raw',
-            'smart_198_normalized',
-            'smart_198_raw',
-            'smart_199_raw'
-        ]
-    }
-
-    for k, i in enumerate([1, 2, 7, 8, 9, 10]):
-        ax.plot(np.arange(X.shape[0]), X[:, i] + 0.01 * k, label=features['total_features'][i + 2])
-    ax.set_ylabel('SMART features value [#]', fontsize=14, fontweight='bold', color='C0')
-    ax.set_xlabel('time points', fontsize=14, fontweight='bold')
-    legend_properties = {'weight': 'bold'}
-    plt.legend(fontsize=12, prop=legend_properties)
-    plt.title('The HDD is {} (failed=1/good=0) predicted as {}'.format(fail, prediction))
-    plt.show()
-
-def pandas_to_3dmatrix(read_dir, model, years, dataset_raw):
-    """
-    Convert a pandas DataFrame to a 3D matrix.
-
-    Args:
-        read_dir (str): The directory path where the matrix file will be read from or saved to.
-        model: The model object.
-        years (list): A list of years.
-        dataset_raw (pandas.DataFrame): The raw dataset.
-
-    Returns:
-        dict: The converted 3D matrix dataset.
-
-    Raises:
-        FileNotFoundError: If the matrix file is not found.
-
-    """
-    join_years = '_' + '_'.join(years)
-    name_file = f'Matrix_Dataset_{join_years}.pkl'
-
-    try:
-        with open(os.path.join(read_dir, name_file), 'rb') as handle:
-            dataset = pickle.load(handle)
-        print('Matrix 3d {} already present'.format(name_file))
-    except FileNotFoundError:
-        print(f'Creating matrix 3D {name_file}')
-        valid_rows_mask = []
-
-        # rows_dim = len(dataset_raw['failure'])
-        # feat_dim = len(dataset_raw.columns) - 2
-
-        # Remove HDDs with some features always NaN
-        for _, row in dataset_raw.iterrows():
-            valid = not any(len(col) == sum(math.isnan(x) for x in col) for col in row[2:])
-            valid_rows_mask.append(valid)
-
-        dataset_raw = dataset_raw[valid_rows_mask]
-        # rows_dim = len(dataset_raw['failure'])
-
-        # Compute max timestamps in an HDD
-        print('Computing maximum number of timestamps of one HDD')
-        max_len = max(len(row['date']) for _, row in dataset_raw.iterrows())
-
-        matrix_3d = []
-        for k, row in dataset_raw.iterrows():
-            print(f'Analyzing HD number {k}', end="\r")
-            hd = [row[feature] for feature in row.index[1:]]
-            hd = np.asarray(hd)
-            hd_padded = np.pad(hd, ((0, 0), (0, max_len - hd.shape[1])), mode='constant', constant_values=2)
-            matrix_3d.append(hd_padded.T)
-
-        matrix_3d = np.asarray(matrix_3d)
-
-        # Debugging information
-        good, failed = 0, 0
-        for row in matrix_3d[:, :, 0]:
-            if 1 in row:
-                failed += 1
-            else:
-                good += 1
-
-        print(f'There are {good} good disks and {failed} failed disks in the dataset')
-
-        dataset = {'matrix': matrix_3d}
-        with open(os.path.join(read_dir, name_file), 'wb') as handle:
-            pickle.dump(dataset, handle)
-
-    return dataset
-
-def matrix3d_to_datasets(matrix, window=1, divide_hdd=1, training_percentage=0.7, resampler_balancing='auto', oversample_undersample=0):
-    """
-    Convert a 3D matrix to datasets for training and testing.
-
-    Args:
-        matrix (ndarray): The 3D matrix containing the data.
-        window (int, optional): The size of the sliding window. Defaults to 1.
-        divide_hdd (int, optional): Flag to divide the HDDs. Defaults to 1.
-        training_percentage (float, optional): The percentage of data to use for training. Defaults to 0.7.
-        resampler_balancing (float, optional): The resampler balancing factor. Defaults to 'auto'.
-        oversample_undersample (int, optional): The type of resampling to use. Defaults to 0.
-
-    Returns:
-        dict: A dictionary containing the training and testing datasets.
-
-    Raises:
-        FileNotFoundError: If the dataset file is not found.
-    """
-
-    name_file = 'Final_Dataset.pkl'
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    read_dir = os.path.join(script_dir, '..', 'output')
-
-    try:
-        with open(os.path.join(read_dir, name_file), 'rb') as handle:
-            dataset = pickle.load(handle)
-        print('Dataset {} already present'.format(name_file))
-    except FileNotFoundError:
-        X_matrix = matrix[:, :, :]
-        Y_matrix = np.zeros(X_matrix.shape[0])
-
-        for hdd in np.arange(X_matrix.shape[0]):
-            if 1 in X_matrix[hdd, :, 0]:
-                Y_matrix[hdd] = 1
-        
-        print('Failed hard disk = {}'.format(sum(Y_matrix)))
-
-        if divide_hdd == 1:
-            X_train_hd, X_test_hd, y_train_hd, y_test_hd = train_test_split(
-                X_matrix, Y_matrix, stratify=Y_matrix, test_size=1 - training_percentage)
-
-            def create_dataset(X_hd, y_hd, for_training=True):
-                X, Y, HD_numbers = [], [], []
-                for hdd_number in np.arange(y_hd.shape[0]):
-                    print(f"Analyzing HD number {hdd_number}", end="\r")
-                    if y_hd[hdd_number] == 1:
-                        end_idx = np.where(X_hd[hdd_number, :, 0] == 1)[0][0]
-                        temp = X_hd[hdd_number, :end_idx, 1:]
-                        label = np.concatenate((np.zeros(temp.shape[0] - 7), np.ones(7)))
-                    else:
-                        end_idx = np.where(X_hd[hdd_number, :, 0] == 2)[0][0] - 8 if np.where(X_hd[hdd_number, :, 0] == 2)[0].size > 0 else -7
-                        temp = X_hd[hdd_number, :end_idx, 1:]
-                        label = np.zeros(temp.shape[0])
-
-                    X.append(temp)
-                    Y.append(label)
-                    if not for_training:
-                        HD_numbers.append(np.ones(temp.shape[0]) * hdd_number)
-
-                X, Y = np.concatenate(X), np.concatenate(Y)
-                if not for_training:
-                    HD_numbers = np.concatenate(HD_numbers)
-                    return X, Y, HD_numbers
-                return X, Y
-
-            X_train, Y_train = create_dataset(X_train_hd, y_train_hd)
-            X_test, Y_test, HD_number_test = create_dataset(X_test_hd, y_test_hd, for_training=False)
-
-            # Remove rows with NaN values
-            non_nan_train = ~np.isnan(X_train).any(axis=1)
-            X_train, Y_train = X_train[non_nan_train], Y_train[non_nan_train]
-
-            non_nan_test = ~np.isnan(X_test).any(axis=1)
-            X_test, Y_test, HD_number_test = X_test[non_nan_test], Y_test[non_nan_test], HD_number_test[non_nan_test]
-
-            # Resampling
-            resampler = RandomUnderSampler(sampling_strategy=resampler_balancing, random_state=42) if oversample_undersample == 0 else SMOTE(sampling_strategy=resampler_balancing, random_state=42)
-            X_train, Y_train = resampler.fit_resample(X_train, Y_train)
-
-            dataset = {'X_train': X_train, 'Y_train': Y_train, 'X_test': X_test, 'Y_test': Y_test, 'HDn_test': HD_number_test}
-
-            with open(os.path.join(read_dir, name_file), 'wb') as handle:
-                pickle.dump(dataset, handle)
-
-    return dataset
-
-def import_data(years, model, name, **args):
+def import_data(years, models, name, **args):
     """ Import hard drive data from csvs on disk.
-    
-    :param quarters: List of quarters to import (e.g., 1Q19, 4Q18, 3Q18, etc.)
-    :param model: String of the hard drive model number to import.
+
+    :param years: List of years to import (e.g., 2019, 2018, etc.)
+    :param models: List of the hard drive model numbers to import.
     :param columns: List of the columns to import.
     :return: Dataframe with hard drive data.
-    
+
     """
 
     # Read the correct .pkl file
     years_list = '_' + '_'.join(years)
     failed = False  # This should be set based on your specific criteria or kept as a placeholder
     suffix = 'failed' if failed else 'all'
+    model_string = "_".join(models)
 
     # Fix the directory name as output
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    file = os.path.join(script_dir, '..', 'output', f'HDD{years_list}_{suffix}_{model}_appended.pkl')
+    file = os.path.join(script_dir, '..', 'output', f'HDD{years_list}_{suffix}_{model_string}_appended.pkl')
 
     if not os.path.exists(file):
         # Fix the directory name
-        file = os.path.join(script_dir, '..', 'output', f'HDD{years_list}_{model}_all.pkl')
+        file = os.path.join(script_dir, '..', 'output', f'HDD{years_list}_{model_string}_all.pkl')
 
     try:
         df = pd.read_pickle(file)
@@ -279,6 +58,7 @@ def import_data(years, model, name, **args):
         logger.info('Creating new DataFrame from CSV files.')
         script_dir = os.path.dirname(os.path.abspath(__file__))
         all_data = []
+        unique_models = set()
 
         for y in tqdm(years, desc="Analyzing years"):
             # Fix the directory name
@@ -288,10 +68,23 @@ def import_data(years, model, name, **args):
                 else:
                     data = pd.read_csv(f, header=0, parse_dates=['date'])
 
-                data = data[data.model == model].copy()
-                data.failure = data.failure.astype('int')
-                all_data.append(data)
+                # Filter the data based on the model number or manufacturer prefix
+                # If the 'manufacturer' key is not found in the args dictionary or its value is 'custom', we use the 'model' key to filter the data
+                manufacturer = args.get('manufacturer', 'custom')
+                if manufacturer != 'custom' and 'model' in data.columns and not data.empty:
+                    model_data = data[data['model'].str.startswith(manufacturer)]
+                    if not model_data.empty:
+                        unique_models.update(model_data['model'].unique())
+                        all_data.append(model_data)
+                else:
+                    for model in models:
+                        if 'model' in data.columns and not data.empty and model in data['model'].values:
+                            model_data = data[data['model'] == model].copy()
+                            unique_models.add(model)
+                            model_data.failure = model_data.failure.astype('int')
+                            all_data.append(model_data)
 
+        logger.info(f"Unique models: {unique_models}")
         df = pd.concat(all_data, ignore_index=True)
         df.set_index(['serial_number', 'date'], inplace=True)
         df.sort_index(inplace=True)
@@ -321,9 +114,10 @@ def filter_HDs_out(df, min_days, time_window, tolerance):
     bad_missing_hds = []
 
     # Loop over each group in the DataFrame, grouped by the first level of the index (serial number)
-    for serial_num, inner_df in df.groupby(level=0):
+    for serial_num, inner_df in tqdm(df.groupby(level=0), desc="Analyzing Hard Drives", unit="drive", ncols=100):
         if len(inner_df) < min_days:  # identify HDs with too few power-on days
             bad_power_hds.append(serial_num)
+            continue
 
         inner_df = inner_df.droplevel(level=0).asfreq('D')  # Convert inner_df to daily frequency
 
@@ -334,7 +128,8 @@ def filter_HDs_out(df, min_days, time_window, tolerance):
         n_missing = inner_df.isna().rolling(time_window).sum()
 
         # Identify HDs with too many missing values, compared to the moving average
-        bad_missing_hds = n_missing[n_missing > moving_avg_missing * tolerance].index.tolist()
+        if (n_missing > moving_avg_missing * tolerance).any().any():
+            bad_missing_hds.append(serial_num)
 
     bad_hds = set(bad_missing_hds + bad_power_hds)
     logger.info(f'Filter result: bad_missing_hds: {len(bad_missing_hds)}, bad_power_hds: {len(bad_power_hds)}')
@@ -368,14 +163,14 @@ def interpolate_ts(df, method='linear'):
     interp_dfs = []
     total_interpolated = 0
 
-    for serial_num, inner_df in df.groupby(level=0):
+    for serial_num, inner_df in tqdm(df.groupby(level=0), desc="Interpolating groups", leave=False, unit="drive", ncols=100):
         inner_df = inner_df.droplevel(level=0).asfreq('D')
         # Count the number of NaN values before interpolation
         before_interpolation = inner_df.isna().sum().sum()
         inner_df.interpolate(method=method, limit_direction='both', axis=0, inplace=True)
 
         # Specify the columns to round
-        columns_to_round = ['predict_val', 'validate_val']
+        columns_to_round = ['predict_val', 'validate_val', 'failure']
 
         # Add a small threshold and round all values below this threshold to 0
         threshold = 1e-10
@@ -392,7 +187,7 @@ def interpolate_ts(df, method='linear'):
         inner_df['serial_number'] = serial_num
         inner_df = inner_df.reset_index()
 
-        print(f'Added {len(inner_df)} items for serial number: {serial_num}\r', end='\r')
+        #print(f'Added {len(inner_df)} items for serial number: {serial_num}\r', end='\r')
         interp_dfs.append(inner_df)
 
     interp_df = pd.concat(interp_dfs, axis=0)
@@ -420,7 +215,7 @@ def generate_failure_predictions(df, days, window):
     group_sizes = df.groupby(level=0).size()
     df = df[df.index.get_level_values(0).isin(group_sizes[group_sizes > days + window].index)]
 
-    for i, (serial_num, inner_df) in enumerate(df.groupby(level=0), start=1):
+    for i, (serial_num, inner_df) in enumerate(tqdm(df.groupby(level=0), desc="Analyzing Hard Drives", unit="drive", ncols=100), start=1):
         print('Analyzing HD {} number {} \r'.format(serial_num,i), end="\r")
         slicer_val = len(inner_df)  # save len(df) to use as slicer value on smooth_smart_9
 
@@ -442,7 +237,6 @@ def generate_failure_predictions(df, days, window):
     valid_list = np.asarray(valid_list)
     return df, pred_list, valid_list
 
-
 def feature_extraction(X):
     """
     Extracts features from the input data with the following steps:
@@ -450,8 +244,8 @@ def feature_extraction(X):
     2. Minimum of all the features and store in the second column.
     3. Maximum of all the features and store in the third column.
     4. Calculate the slope of the features and store in the fourth column.
-    5. Store the y-intercept of the linear regression line (i.e., the expected mean value of Y when all X=0) in the fifth column.
-    6. Use HMM to generate state sequences and store the most frequent state in the fifth column.
+    5. Optional: Store the y-intercept of the linear regression line (i.e., the expected mean value of Y when all X=0) in the fifth column.
+    6. Optional: Use HMM to generate state sequences and store the most frequent state in the fifth column.
     7. Calculate the standard deviation and store in the seventh column.
     8. Calculate the autocorrelation for lag-1 and store in the eighth column.
     
@@ -472,10 +266,11 @@ def feature_extraction(X):
     X_feature[:,:,2] = np.max((X), axis=2)
     #print(f'Max: {X_feature[:,:,2]}')
     # Calculate the slope of the features
-    #X_feature[:,:,3] = (np.max((X), axis = 2) - np.min((X), axis = 2)) / dim_window
+    X_feature[:,:,3] = (np.max((X), axis = 2) - np.min((X), axis = 2)) / dim_window
     #print(f'Similar slope: {X_feature[:,:,3]}')
+    '''
     # Use Linear Regression to extract slope and intercept
-    for s in tqdm(range(samples), desc='Processing samples with LinearRegression'):
+    for s in tqdm(range(samples), desc='Processing samples with LinearRegression', unit='sample', ncols=100):
         for f in range(features):
             model = LinearRegression()
             model.fit(np.arange(dim_window).reshape(-1, 1), X[s, f, :])
@@ -483,33 +278,28 @@ def feature_extraction(X):
             X_feature[s, f, 4] = model.intercept_  # Intercept
     #print(f'Coefficent: {X_feature[:,:,3]}')
     #print(f'Intercept: {X_feature[:,:,4]}')
-    # Use HMM to generate state sequences
-    for f in tqdm(range(features), desc='Processing features with GaussianHMM'):
-        feature_series = X[:, f, :]
-        feature_series_reshaped = feature_series.reshape(-1, dim_window)
-
-        # Train HMM on the reshaped feature series
-        n_states = 3  # Number of hidden states (this can be adjusted)
-        hmm_model = hmm.GaussianHMM(n_components=n_states, covariance_type="diag", n_iter=1000)
-        hmm_model.fit(feature_series_reshaped)
-
-        # Generate state sequences for each sample
-        for s in tqdm(range(samples), desc='Generating state sequences for each sample', leave=False):
-            state_seq = hmm_model.predict(feature_series[s].reshape(-1, 1))
-            # Using the most frequent state as an additional feature
-            most_frequent_state = np.bincount(state_seq).argmax()
-            X_feature[s, f, 5] = most_frequent_state  # Store HMM result at index 5
-    #print(f'HMM state sequence: {X_feature[:, :, 5]}')
+    '''
 
     # Calculate the standard deviation
-    X_feature[:, :, 6] = np.std(X, axis=2)
+    X_feature[:, :, 4] = np.std(X, axis=2)
     #print(f'Standard Deviation: {X_feature[:, :, 6]}')
 
     # Calculate the autocorrelation for lag-1
     for s in tqdm(range(samples), desc="Processing samples with Auto Correlation"):
         for f in range(features):
-            X_feature[s, f, 7] = np.corrcoef(X[s, f, :-1], X[s, f, 1:])[0, 1]
+            X_feature[s, f, 5] = np.corrcoef(X[s, f, :-1], X[s, f, 1:])[0, 1]
     #print(f'Autocorrelation: {X_feature[:, :, 7]}')
+    # Calculate the RMS
+    X_feature[:, :, 6] = np.sqrt(np.mean(np.square(X), axis=2))
+    #print(f'RMS: {X_feature[:, :, 6]}')
+    # Calculate the skewness
+    X_feature[:, :, 7] = skew(X, axis=2)
+    #print(f'Skewness: {X_feature[:, :, 7]}')
+
+    # Compute and print the rank of the feature matrix
+    # If the rank is equivalent to the number of features, the features are linearly independent
+    rank = matrix_rank(X_feature)
+    print(f'Rank of the feature matrix: {rank}')
 
     return X_feature
 
@@ -551,7 +341,8 @@ class DatasetPartitioner:
         https://github.com/Prognostika/tcn-hard-disk-failure-prediction/wiki/Code_Process#partition-dataset-subflowchart
     """
     def __init__(self, df, model, overlap=0, rank='None', num_features=10, test_type='t-test', technique='random',
-                 test_train_perc=0.2, windowing=1, window_dim=5, resampler_balancing='auto', oversample_undersample='None', fillna_method='None'):
+                 test_train_perc=0.2, windowing=1, window_dim=5, resampler_balancing='auto', oversample_undersample='None',
+                 fillna_method='None', smoothing_level=0.5, max_wavelet_scales=50):
         """
         Initialize the DatasetPartitioner object.
         
@@ -569,6 +360,7 @@ class DatasetPartitioner:
         - resampler_balancing (float): The resampler balancing factor (default: auto).
         - oversample_undersample (str): The oversample/undersample value (default: None).
         - fillna_method (str): Method to fill the NA values (default: 'None').
+        - smoothing_level (float): The smoothing level (default: 0.5).
 
         """
         self.df = df
@@ -584,8 +376,53 @@ class DatasetPartitioner:
         self.resampler_balancing = resampler_balancing
         self.oversample_undersample = oversample_undersample
         self.fillna_method = fillna_method
+        self.smoothing_level = smoothing_level
+        self.max_wavelet_scales = max_wavelet_scales
         self.script_dir = os.path.dirname(os.path.abspath(__file__))
         self.Xtrain, self.Xtest, self.ytrain, self.ytest = self.partition()
+
+    def apply_cwt(self, df, wavelet='cmor'):
+        """
+        Apply the Continuous Wavelet Transform (CWT) to each windowed segment.
+        Assumes the input dataframe is pre-windowed and columns are named to reflect time-series data points in each window.
+        
+        Args:
+            df (DataFrame): DataFrame containing windowed time-series data.
+            scales (array): Array of scales to use for the CWT.
+            wavelet (str): Wavelet function name.
+        
+        Returns:
+            DataFrame: A DataFrame where each cell contains the CWT result (complex coefficients) for that segment.
+        """
+        scales=np.arange(1, self.max_wavelet_scales)
+        # Applying CWT along the rows assuming each row is a time-windowed segment
+        cwt_columns = [col for col in df.columns if 'smart' in col]  # Assuming SMART data columns start with 'smart'
+        for col in tqdm(cwt_columns, desc="Processing columns", leave=False, unit="column", ncols=100):
+            # Extract the signal from the DataFrame
+            signal = df[col].values
+            # Apply Continuous Wavelet Transform
+            coefficients, frequencies = pywt.cwt(signal, scales, wavelet)
+            # Store results: Magnitude of coefficients for simplicity in handling and visualization
+            df[col] = list(coefficients)  # Store as list of arrays (one per scale)
+
+        return df
+
+    def apply_exponential_smoothing(self, df):
+        """
+        Apply exponential smoothing to each time-series data column in the DataFrame.
+
+        Args:
+            df (DataFrame): DataFrame containing time-series data.
+
+        Returns:
+            DataFrame: A DataFrame with the smoothed time-series data.
+        """
+        for serial_num, group in tqdm(df.groupby('serial_number'), desc="Processing groups", leave=False, unit="group", ncols=100):
+            for col in group.columns:
+                if col.startswith('smart'):
+                    group[col] = ExponentialSmoothing(group[col], trend=None, seasonal=None, seasonal_periods=None).fit(smoothing_level=self.smoothing_level).fittedvalues
+            df.loc[group.index] = group
+        return df
 
     def partition(self):
         """
@@ -612,10 +449,17 @@ class DatasetPartitioner:
         self.df = pd.DataFrame(mms.fit_transform(self.df), columns=self.df.columns, index=self.df.index)
         # self.df is now normalized, but temporal is original string data, to avoid normalization of 'serial_number' and 'date' and other non float64 columns
         self.df = pd.concat([self.df, temporal], axis=1)
-
+        # Perform the windowing action for time series data
         windowed_df = self.handle_windowing()
-
-        logger.info('Creating training and test dataset')
+        # Preprocess the dataset for splitting, remove the redundant columns
+        windowed_df = self.preprocess_dataset(windowed_df)
+        # Add exponential smoothing method
+        logger.info('Performing exponential smoothing...')
+        windowed_df = self.apply_exponential_smoothing(windowed_df)
+        # Apply wavelet transform right after windowing
+        logger.info('Applying CWT...')
+        windowed_df = self.apply_cwt(windowed_df)
+        logger.info('Creating training and test dataset...')
         return self.split_dataset(windowed_df)
     
     def factors(self, n):
@@ -672,7 +516,6 @@ class DatasetPartitioner:
         """
         Handle the windowing process for the dataset.
 
-
         Parameters:
             None
         
@@ -717,6 +560,86 @@ class DatasetPartitioner:
         df.sort_index(axis=1, inplace=True)
         return df
 
+    # def perform_windowing_2(self):
+    #     """
+    #     Perform the windowing operation on the dataset.
+    #     We have the serial_number and date columns in the dataset here.
+
+    #     Parameters:
+    #         None
+
+    #     Returns:
+    #     - DataFrame: The windowed dataframe.
+    #     """
+    #     # Convert the initial DataFrame to a Dask DataFrame for heavy operations
+    #     chunk_columns = 100000
+    #     windowed_df = dd.from_pandas(self.df.copy(), npartitions=int(len(self.df)/chunk_columns) + 1)
+    #     if self.overlap == 1:  # If the overlap option is chosed as complete overlap
+    #         # The following code will generate self.window_dim - 1 columns for each column in the dataset
+    #         for i in np.arange(self.window_dim - 1):
+    #             print(f'Concatenating time - {i} \r', end="\r")
+    #             # Shift the dataframe and concatenate along the columns
+    #             windowed_df = dd.concat([self.df.shift(i + 1), windowed_df], axis=1)
+    #     elif self.overlap == 2:  # If the overlap option is chosed as dynamic overlap based on the factors of window_dim
+    #         # Get the factors of window_dim
+    #         window_dim_divisors = self.factors(self.window_dim)
+    #         total_shifts = 0
+    #         previous_down_factor = 1
+    #         serials = self.df['serial_number']
+    #         for down_factor in window_dim_divisors:
+    #             # Shift the dataframe by the factor and concatenate
+    #             for i in np.arange(down_factor - 1):
+    #                 total_shifts += previous_down_factor
+    #                 print(f'Concatenating time - {total_shifts} \r', end="\r")
+    #                 windowed_df = dd.concat([self.df.shift(i + 1), windowed_df], axis=1)
+    #             previous_down_factor *= down_factor
+
+    #             # Compute intermediate result to apply sampling
+    #             windowed_df = windowed_df.compute()  # Convert back to pandas for sampling
+    #             # Under sample the dataframe based on the serial numbers and the factor
+    #             indexes = windowed_df.groupby(serials).apply(self.under_sample, down_factor)
+    #             # Update windowed_df based on the indexes, undersamples the DataFrame based on the serial numbers and the factor down_factor, reducing the number of rows in the DataFrame.
+    #             windowed_df = windowed_df.loc[np.concatenate(indexes.values.tolist(), axis=0), :]
+    #             # Convert back to Dask DataFrame
+    #             windowed_df = dd.from_pandas(windowed_df, npartitions=int(len(windowed_df)/chunk_columns) + 1)
+    #     else:  # If the overlap is other value, then we only completely overlap the dataset for the failed HDDs, and dynamically overlap the dataset for the good HDDs
+    #         # Get the factors of window_dim
+    #         window_dim_divisors = self.factors(self.window_dim)
+    #         total_shifts = 0
+    #         previous_down_factor = 1
+    #         serials = self.df['serial_number']
+    #         df_failed = self.df[self.df['validate_val']==1]
+    #         windowed_df_failed = df_failed
+    #         for i in np.arange(self.window_dim - 1):
+    #             print(f'Concatenating time - {i} \r', end="\r")
+    #             # Shift the dataframe and concatenate along the columns
+    #             windowed_df_failed = dd.concat([self.df.shift(i + 1), windowed_df_failed], axis=1)
+    #         for down_factor in window_dim_divisors:
+    #             # Shift the dataframe by the factor and concatenate
+    #             for i in np.arange(down_factor - 1):
+    #                 total_shifts += previous_down_factor
+    #                 print(f'Concatenating time - {total_shifts} \r', end="\r")
+    #                 windowed_df = dd.concat([self.df.shift(i + 1), windowed_df], axis=1)
+    #             previous_down_factor *= down_factor
+
+    #             # Compute intermediate result to apply sampling
+    #             windowed_df = windowed_df.compute()  # Convert back to pandas for sampling
+    #             # Under sample the dataframe based on the serial numbers and the factor
+    #             indexes = windowed_df.groupby(serials).apply(self.under_sample, down_factor)
+    #             # Update windowed_df based on the indexes
+    #             windowed_df = windowed_df.loc[np.concatenate(indexes.values.tolist(), axis=0), :]
+    #             # Convert back to Dask DataFrame
+    #             windowed_df = dd.from_pandas(windowed_df, npartitions=int(len(windowed_df)/chunk_columns) + 1)
+
+    #         windowed_df = dd.concat([windowed_df, windowed_df_failed])
+    #         windowed_df.reset_index(inplace=True, drop=True)
+
+    #     # Compute the final Dask DataFrame to pandas DataFrame
+    #     final_df = windowed_df.compute()
+    #     # Generate the final DataFrame
+    #     final_df.to_pickle(os.path.join(self.script_dir, '..', 'output', f'{self.model}_Dataset_windowed_{self.window_dim}_rank_{self.rank}_{self.num_features}_overlap_{self.overlap}.pkl'))
+    #     return self.rename_columns(final_df)
+
     def perform_windowing(self):
         """
         Perform the windowing operation on the dataset.
@@ -728,15 +651,13 @@ class DatasetPartitioner:
         Returns:
         - DataFrame: The windowed dataframe.
         """
-        # Convert the initial DataFrame to a Dask DataFrame for heavy operations
-        chunk_columns = 100000
-        windowed_df = dd.from_pandas(self.df.copy(), npartitions=int(len(self.df)/chunk_columns) + 1)
+        windowed_df = self.df.copy()
         if self.overlap == 1:  # If the overlap option is chosed as complete overlap
             # The following code will generate self.window_dim - 1 columns for each column in the dataset
             for i in np.arange(self.window_dim - 1):
                 print(f'Concatenating time - {i} \r', end="\r")
                 # Shift the dataframe and concatenate along the columns
-                windowed_df = dd.concat([self.df.shift(i + 1), windowed_df], axis=1)
+                windowed_df = pd.concat([self.df.shift(i + 1), windowed_df], axis=1)
         elif self.overlap == 2:  # If the overlap option is chosed as dynamic overlap based on the factors of window_dim
             # Get the factors of window_dim
             window_dim_divisors = self.factors(self.window_dim)
@@ -748,17 +669,13 @@ class DatasetPartitioner:
                 for i in np.arange(down_factor - 1):
                     total_shifts += previous_down_factor
                     print(f'Concatenating time - {total_shifts} \r', end="\r")
-                    windowed_df = dd.concat([self.df.shift(i + 1), windowed_df], axis=1)
+                    windowed_df = pd.concat([self.df.shift(i + 1), windowed_df], axis=1)
                 previous_down_factor *= down_factor
 
-                # Compute intermediate result to apply sampling
-                windowed_df = windowed_df.compute()  # Convert back to pandas for sampling
                 # Under sample the dataframe based on the serial numbers and the factor
                 indexes = windowed_df.groupby(serials).apply(self.under_sample, down_factor)
                 # Update windowed_df based on the indexes, undersamples the DataFrame based on the serial numbers and the factor down_factor, reducing the number of rows in the DataFrame.
                 windowed_df = windowed_df.loc[np.concatenate(indexes.values.tolist(), axis=0), :]
-                # Convert back to Dask DataFrame
-                windowed_df = dd.from_pandas(windowed_df, npartitions=int(len(windowed_df)/chunk_columns) + 1)
         else:  # If the overlap is other value, then we only completely overlap the dataset for the failed HDDs, and dynamically overlap the dataset for the good HDDs
             # Get the factors of window_dim
             window_dim_divisors = self.factors(self.window_dim)
@@ -770,30 +687,25 @@ class DatasetPartitioner:
             for i in np.arange(self.window_dim - 1):
                 print(f'Concatenating time - {i} \r', end="\r")
                 # Shift the dataframe and concatenate along the columns
-                windowed_df_failed = dd.concat([self.df.shift(i + 1), windowed_df_failed], axis=1)
+                windowed_df_failed = pd.concat([self.df.shift(i + 1), windowed_df_failed], axis=1)
             for down_factor in window_dim_divisors:
                 # Shift the dataframe by the factor and concatenate
                 for i in np.arange(down_factor - 1):
                     total_shifts += previous_down_factor
                     print(f'Concatenating time - {total_shifts} \r', end="\r")
-                    windowed_df = dd.concat([self.df.shift(i + 1), windowed_df], axis=1)
+                    windowed_df = pd.concat([self.df.shift(i + 1), windowed_df], axis=1)
                 previous_down_factor *= down_factor
 
-                # Compute intermediate result to apply sampling
-                windowed_df = windowed_df.compute()  # Convert back to pandas for sampling
                 # Under sample the dataframe based on the serial numbers and the factor
                 indexes = windowed_df.groupby(serials).apply(self.under_sample, down_factor)
                 # Update windowed_df based on the indexes
                 windowed_df = windowed_df.loc[np.concatenate(indexes.values.tolist(), axis=0), :]
-                # Convert back to Dask DataFrame
-                windowed_df = dd.from_pandas(windowed_df, npartitions=int(len(windowed_df)/chunk_columns) + 1)
 
-            windowed_df = dd.concat([windowed_df, windowed_df_failed])
+            windowed_df = pd.concat([windowed_df, windowed_df_failed])
             windowed_df.reset_index(inplace=True, drop=True)
 
-        # Compute the final Dask DataFrame to pandas DataFrame
-        final_df = windowed_df.compute()
         # Generate the final DataFrame
+        final_df = windowed_df
         final_df.to_pickle(os.path.join(self.script_dir, '..', 'output', f'{self.model}_Dataset_windowed_{self.window_dim}_rank_{self.rank}_{self.num_features}_overlap_{self.overlap}.pkl'))
         return self.rename_columns(final_df)
 
@@ -812,7 +724,6 @@ class DatasetPartitioner:
         - ytrain (Series): The training labels.
         - ytest (Series): The test labels.
         """
-        df = self.preprocess_dataset(df)
         if self.technique == 'random':
             y = df['predict_val']   # y represents the prediction value (Series)
             df.drop(columns=['serial_number', 'date', 'failure', 'predict_val', 'validate_val'], inplace=True)
@@ -914,7 +825,6 @@ class DatasetPartitioner:
             return df
          
         # Replace the 'predict_val' column with a new column 'predict_val' that contains the maximum value of the 'predict_val' columns
-        # Fixed RegEx problem
         predict_val_cols = [col for col in df.columns if re.match(r'^predict_val_\d+$', col)]
         df['predict_val'] = df[predict_val_cols].max(axis=1)
 
@@ -1084,33 +994,111 @@ class DatasetPartitioner:
         """
         return iter((self.Xtrain, self.Xtest, self.ytrain, self.ytest))
 
-def feature_selection(df, num_features, test_type):
+def find_relevant_models(df):
+    """
+    Calculate the Kullback-Leibler Divergence between different models based on smart attributes over time,
+    and determine the most relevant and irrelevant models based on the weighted KLD.
+
+    Parameters:
+    df (pd.DataFrame): The input DataFrame containing 'date', 'model', 'serial_number' column, and 'smart*' attribute columns.
+
+    Returns:
+    relevant_models (list): List of relevant models.
+    irrelevant_models (list): List of irrelevant models.
+    """
+    # Create a copy of the DataFrame and reset index
+    df_copy = df.copy()
+    df_copy.reset_index(inplace=True)
+    
+    # Select columns starting with 'smart*'
+    smart_cols = [col for col in df_copy.columns if col.startswith('smart')]
+
+    # Ensure 'date' is in datetime format
+    df_copy['date'] = pd.to_datetime(df_copy['date'])
+
+    # Sort the DataFrame by 'date'
+    df_copy = df_copy.sort_values(by='date')
+
+    # Get the unique models
+    unique_models = df_copy['model'].unique()
+
+    # Initialize a dictionary to store weighted mean KLDs
+    weighted_mean_klds = {}
+
+    for model in tqdm(unique_models, desc="Processing models", unit='model', ncols=100):
+        model_data = df_copy[df_copy['model'] == model][smart_cols].fillna(0)
+
+        weighted_klds = []
+        for other_model in tqdm(unique_models, desc=f"Processing KLDs for model {model}", leave=False, unit='model', ncols=100):
+            if model != other_model:
+                other_model_data = df_copy[df_copy['model'] == other_model][smart_cols].fillna(0)
+
+                # Calculate KLD for each SMART attribute independently and weight by p-value
+                for smart_col in smart_cols:
+                    p = model_data[smart_col].to_numpy() + 1e-10  # Add a small value to avoid division by zero
+                    q = other_model_data[smart_col].to_numpy() + 1e-10  # Add a small value to avoid division by zero
+                    kld_value = np.sum(rel_entr(p, q))  # Calculate the Kullback-Leibler Divergence
+
+                    # Calculate p-value using t-test
+                    _, p_value = scipy.stats.ttest_ind(p, q, equal_var=False)
+                    # Use the inverse of the p-value as the weight (the smaller the p-value, the higher the weight)
+                    weight = 1 / (p_value + 1e-10)
+
+                    weighted_klds.append(kld_value * weight)
+
+        if weighted_klds:
+            # Calculate the overall weighted KLD for the model
+            weighted_mean_klds[model] = np.nanmean(weighted_klds)
+        else:
+            weighted_mean_klds[model] = 0
+
+    # Convert the weighted mean KLDs to a DataFrame
+    mean_kld_df = pd.DataFrame.from_dict(weighted_mean_klds, orient='index', columns=['weighted_mean_kld'])
+
+    # Print the intermediate results for debugging
+    print("Weighted Mean KLDs:")
+    print(mean_kld_df)
+
+    # Define the threshold for relevance
+    threshold = mean_kld_df['weighted_mean_kld'].mean()
+
+    # Identify the most relevant and irrelevant models based on the weighted mean KLD
+    relevant_models = mean_kld_df[mean_kld_df['weighted_mean_kld'] <= threshold].index.tolist()
+    irrelevant_models = mean_kld_df[mean_kld_df['weighted_mean_kld'] > threshold].index.tolist()
+
+    return relevant_models, irrelevant_models
+
+def feature_selection(df, num_features, test_type, enable_ga_algorithm, n_pop, n_gen):
     """
     Selects the top 'num_features' features from the given dataframe based on statistical tests.
     Step 1.4: Feature selection from Classification.py
     Args:
         df (pandas.DataFrame): The input dataframe.
         num_features (int): The number of features to select.
+        test_type (str): The type of statistical test to use.
+        enable_ga_algorithm (bool): Whether to enable the Genetic Algorithm feature selection.
+        n_pop (int): The number of individuals in the population.
+        n_gen (int): The number of generations.
 
     Returns:
         pandas.DataFrame: The dataframe with the selected features.
+        list: The list of selected features and the corresponding p-values.
     """
-    # n_pop = 10
-    # n_gen = 2
-    # y = df['predict_val']
-    # X = df.drop(columns=['predict_val'])
+    if enable_ga_algorithm == True:
+        y = df['predict_val']
+        X = df.drop(columns=['predict_val'])
 
-    # selector = GeneticFeatureSelector(X, y, n_population=n_pop, n_generation=n_gen)
+        selector = GeneticFeatureSelector(X, y, n_population=n_pop, n_generation=n_gen)
 
-    # logger.info("Running Genetic Algorithm for feature selection")
-    # hof = selector.run_genetic_algorithm()
+        logger.info("Running Genetic Algorithm for feature selection")
+        hof = selector.run_genetic_algorithm()
 
-    # accuracy, individual, header = selector.best_individual()
-    # logger.info(f'Best Accuracy: {accuracy}')
-    # logger.info(f'Number of Features in Subset: {individual.count(1)}')
-    # logger.info(f'Feature Subset: {header}')
+        accuracy, individual, header = selector.best_individual()
+        logger.info(f'Best Accuracy: {accuracy}')
+        logger.info(f'Number of Features in Subset: {individual.count(1)}')
+        logger.info(f'Feature Subset: {header}')
 
-    # df = df[header + ['predict_val']]
+        df = df[header + ['predict_val']]
 
     # Step 1.4.1: Define empty lists and dictionary
     features = []
@@ -1156,7 +1144,7 @@ def feature_selection(df, num_features, test_type):
             features = np.concatenate((features, np.asarray(feature).reshape(1,)))
     # Step 1.4.2.5: Update df to only include selected features
     df = df[features]
-    return df
+    return df, features
 
 if __name__ == '__main__':
     features = {

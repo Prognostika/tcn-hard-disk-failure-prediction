@@ -1,10 +1,12 @@
-import pandas as pd
+# import pandas as pd
+import modin.pandas as pd
 import numpy as np
 import random
 from sklearn.linear_model import LogisticRegression
 from sklearn.model_selection import cross_val_score
 from sklearn.preprocessing import LabelEncoder
 from deap import creator, base, tools, algorithms
+from tqdm import tqdm
 
 
 class GeneticFeatureSelector:
@@ -36,13 +38,21 @@ class GeneticFeatureSelector:
         Returns:
             None
         """
+        def biased_random():
+            return 1 if random.random() < 0.75 else 0
+
+        # A positive weight indicates that the genetic algorithm should try to maximize that objective,
+        # while a negative weight indicates that it should try to minimize that objective.
         creator.create("FitnessMax", base.Fitness, weights=(1.0,))
+        # Fitness function
         creator.create("Individual", list, fitness=creator.FitnessMax)
 
         # Create toolbox
-        self.toolbox.register("attr_bool", random.randint, 0, 1)
+        self.toolbox.register("attr_bool", biased_random)
+        # Initialize the individual with random binary values
         self.toolbox.register("individual", tools.initRepeat,
                               creator.Individual, self.toolbox.attr_bool, len(self.X.columns))
+        # Initialize the population with individuals
         self.toolbox.register("population", tools.initRepeat, list,
                               self.toolbox.individual)
         self.toolbox.register("evaluate", self.get_fitness)
@@ -96,6 +106,7 @@ class GeneticFeatureSelector:
             # Apply classification algorithm
             clf = LogisticRegression()
 
+            # Calculate the average cross-validation score
             return (self.avg(cross_val_score(clf, X_subset, self.y, cv=5)),)
         else:
             return (0,)
@@ -132,8 +143,8 @@ class GeneticFeatureSelector:
         """
         max_accuracy = 0.0
         best_individual = None
-        for individual in self.hof:
-            if individual.fitness.values > max_accuracy:
+        for individual in tqdm(self.hof, desc="Processing individuals"):
+            if individual.fitness.values[0] > max_accuracy:
                 max_accuracy = individual.fitness.values
                 best_individual = individual
 

@@ -1,5 +1,6 @@
 import os
-import pandas as pd
+# import pandas as pd
+import modin.pandas as pd
 import sys
 from sklearn.cluster import DBSCAN
 from Dataset_manipulation import *
@@ -10,20 +11,18 @@ from sklearn.ensemble import RandomForestClassifier, IsolationForest, ExtraTrees
 from sklearn.neighbors import KNeighborsClassifier
 from sklearn.tree import DecisionTreeClassifier
 from sklearn.linear_model import LogisticRegression
-from sklearn.utils import shuffle
-from Networks_pytorch import *
-from sklearn.metrics import accuracy_score, roc_auc_score, make_scorer, silhouette_score
-import torch.optim as optim
 from sklearn import svm
-from tqdm import tqdm
 from xgboost import XGBClassifier
 from sklearn.neural_network import MLPClassifier
-from datetime import datetime
-from joblib import dump
-from sklearn.model_selection import GridSearchCV, RandomizedSearchCV, cross_val_score, StratifiedKFold
 from sklearn.naive_bayes import GaussianNB
-import json
+from rgf.sklearn import RGFClassifier
 import logger
+import ray
+from ray import tune
+from ray.tune.schedulers.async_hyperband import ASHAScheduler
+from ray.tune import CLIReporter
+from json_param import save_best_params_to_json, load_best_params_from_json, save_params_to_json
+from network_training import train_and_evaluate_model, train_dl_model
 
 
 # Define default global values
@@ -40,164 +39,16 @@ TRAINING_PARAMS = {
     'hidden_size': 8,  # DenseNet
     'num_layers': 1,  # NNet
     'optimizer_type': 'Adam',
-    'num_workers': 8
+    'num_workers': 8,
+    'scheduler_type': 'ReduceLROnPlateau',
+    'scheduler_factor': 0.1,
+    'scheduler_patience': 10,
+    'scheduler_step_size': 30,
+    'scheduler_gamma': 0.9,
+    'loss_function': 'CrossEntropy'
 }
 
-def save_best_params_to_json(best_params, classifier_name, id_number):
-    """
-    Saves the best parameters to a JSON file.
-
-    Args:
-        best_params (dict): The best parameters.
-        classifier_name (str): The name of the classifier.
-        id_number (str): The ID number for the model.
-
-    Returns:
-        None
-    """
-    # Define the directory path
-    param_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'model', id_number)
-    # Create the directory if it doesn't exist
-    if not os.path.exists(param_dir):
-        os.makedirs(param_dir)
-
-    # Define the file path
-    file_path = os.path.join(param_dir, f'{classifier_name.lower()}_{id_number}_best_params.json')
-
-    # Save the best parameters to a JSON file
-    with open(file_path, 'w') as f:
-        json.dump(best_params, f)
-
-    logger.info(f'Best parameters saved to: {file_path}')
-
-def load_best_params_from_json(classifier_name, id_number):
-    """
-    Loads the best parameters from a JSON file.
-
-    Args:
-        classifier_name (str): The name of the classifier.
-        id_number (str): The ID number for the model.
-
-    Returns:
-        dict: The best parameters.
-    """
-    # Define the directory path
-    param_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'model', id_number)
-
-    # Define the file path
-    file_path = os.path.join(param_dir, f'{classifier_name.lower()}_{id_number}_best_params.json')
-
-    # Load the best parameters from a JSON file
-    with open(file_path, 'r') as f:
-        best_params = json.load(f)
-
-    logger.info(f'Best parameters loaded from: {file_path}')
-
-    return best_params
-
-def train_and_evaluate_model(model, param_grid, classifier_name, X_train, Y_train, X_test, Y_test, id_number, metric, search_method='randomized', n_iterations=100):
-    """
-    Trains and evaluates a machine learning model.
-
-    Args:
-        model (object): The machine learning model to be trained and evaluated.
-        param_grid (dict): The parameter grid to search over.
-        classifier_name (str): The name of the classifier.
-        X_train (array-like): The training data features.
-        Y_train (array-like): The training data labels.
-        X_test (array-like): The test data features.
-        Y_test (array-like): The test data labels.
-        id_number (str): The ID number for the model.
-        metric (str): The metric to be used for evaluation.
-        search_method (str, optional): The search method to use. Defaults to 'randomized'.
-        n_iterations (int, optional): The number of iterations for training. Defaults to 100.
-
-    Returns:
-        str: The path to the saved model file.
-    """
-    writer = SummaryWriter(f'runs/{classifier_name}_Training_Graph')
-    X_train, Y_train = shuffle(X_train, Y_train)
-
-    # Define supervised classifiers
-    supervised_classifiers = ['RandomForest', 'KNeighbors', 'DecisionTree', 'LogisticRegression', 'SVM', 'XGB', 'MLP', 'ExtraTrees', 'GradientBoosting', 'NaiveBayes']
-
-    # Define scoring metrics based on the type of classifier
-    if classifier_name in supervised_classifiers:
-        scoring = {'accuracy': make_scorer(accuracy_score), 'f1': make_scorer(f1_score)}
-    else:
-        scoring = {'silhouette': make_scorer(silhouette_score)}
-
-    # Choose the search method
-    search_method = 'randomized'  # 'grid' for GridSearchCV, 'randomized' for RandomizedSearchCV
-
-    if search_method == 'grid':
-        # Initialize GridSearchCV
-        search = GridSearchCV(estimator=model, param_grid=param_grid, cv=3, n_jobs=-1, verbose=2, scoring=scoring, refit='f1')
-    elif search_method == 'randomized':
-        # Initialize RandomizedSearchCV
-        search = RandomizedSearchCV(estimator=model, param_distributions=param_grid, cv=3, n_jobs=-1, verbose=2, scoring=scoring, refit='f1', n_iter=100)
-    else:
-        raise ValueError(f'Invalid search method: {search_method}')
-
-    # Fit the search method
-    search.fit(X_train, Y_train)
-
-    if classifier_name in supervised_classifiers:
-        # Define StratifiedKFold cross-validator
-        stratified_kfold = StratifiedKFold(n_splits=5)
-        # Calculate cross validation score
-        cv_scores = cross_val_score(search.best_estimator_, X_train, Y_train, cv=stratified_kfold)
-
-        logger.info(f"Cross validation scores: {cv_scores}")
-        logger.info(f"Mean cross validation score: {cv_scores.mean()}")
-    else:
-        # For unsupervised classifiers, calculate silhouette score
-        labels = search.best_estimator_.fit_predict(X_train)
-        silhouette_avg = silhouette_score(X_train, labels)
-        logger.info(f"Silhouette score: {silhouette_avg}")
-
-    # Get the best parameters
-    best_params = search.best_params_
-    logger.info(f"Best parameters: {best_params}")
-
-    # Save the best parameters to a JSON file
-    save_best_params_to_json(best_params, classifier_name, id_number)
-
-    # Get the best estimator
-    best_model = search.best_estimator_
-
-    # Split the training data into multiple batches
-    batch_size = len(X_train) // n_iterations
-    pbar = tqdm(total=n_iterations)  # Initialize tqdm with the total number of batches
-
-    for i in range(0, len(X_train), batch_size):
-        best_model.fit(X_train[i:i+batch_size, :], Y_train[i:i+batch_size])
-        pbar.update(1)  # Update the progress bar
-
-    pbar.close()
-    prediction = best_model.predict(X_test)
-    Y_test_real = Y_test
-    accuracy = accuracy_score(Y_test_real, prediction)
-    auc = roc_auc_score(Y_test_real, prediction)
-    logger.info(f'{classifier_name} Prediction Accuracy: {accuracy * 100:.4f}%, AUC: {auc:.2f}')
-    report_metrics(Y_test_real, prediction, metric, writer, n_iterations)  # TODO:
-    writer.close()
-
-    # Save the trained model to a file
-    model_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'model', id_number)
-    # Create the directory if it doesn't exist
-    if not os.path.exists(model_dir):
-        os.makedirs(model_dir)
-    # Format as string
-    now_str = datetime.now().strftime("%Y%m%d_%H%M%S")
-    # Save the model
-    model_path = os.path.join(model_dir, f'{classifier_name}_{id_number}_iterations_{n_iterations}_{now_str}.joblib')
-    dump(best_model, model_path)
-    logger.info(f'Model saved as: {model_path}')
-
-    return model_path
-
-def classification(X_train, Y_train, X_test, Y_test, classifier, metric, **args):
+def classification(X_train, Y_train, X_test, Y_test, classifier, **args):
     """
     Perform classification using the specified classifier.
     --- Step 1.7: Perform Classification
@@ -207,7 +58,6 @@ def classification(X_train, Y_train, X_test, Y_test, classifier, metric, **args)
     - X_test (array-like): Test data features.
     - Y_test (array-like): Test data labels.
     - classifier (str): The classifier to use. Options: 'RandomForest', 'TCN', 'LSTM'.
-    - metric (str): The metric to evaluate the classification performance.
     - **args: Additional arguments specific to each classifier.
 
     Returns:
@@ -236,12 +86,39 @@ def classification(X_train, Y_train, X_test, Y_test, classifier, metric, **args)
             'bootstrap': [True, False]
         }
 
-        # If the best parameters exist, use them
-        if best_params:
-            model.set_params(**best_params)
+        # Default parameters
+        default_params = {
+            'n_estimators': 1000,
+            'min_samples_split': 2,
+            'min_samples_leaf': 1,
+            'max_features': 'auto',
+            'max_depth': None,
+            'criterion': 'gini',
+            'bootstrap': True
+        }
+
+        if not args['enable_tuning']:
+            if best_params:
+                model.set_params(**best_params)
+            else:
+                model.set_params(**default_params)
             param_grid = {}
 
-        return train_and_evaluate_model(model, param_grid, 'RandomForest', X_train, Y_train, X_test, Y_test, args['id_number'], metric, args['search_method'], n_iterations)
+        return train_and_evaluate_model(
+            model,
+            param_grid,
+            'RandomForest',
+            X_train,
+            Y_train,
+            X_test,
+            Y_test,
+            args['id_number'],
+            args['metric'],
+            args['search_method'],
+            args['n_iterations'],
+            args['launch_dashboard']
+        )
+
     elif classifier == 'KNeighbors':
         # Step 1.7.2: Perform Classification using KNeighbors.
         try:
@@ -258,12 +135,35 @@ def classification(X_train, Y_train, X_test, Y_test, classifier, metric, **args)
             'metric': ['euclidean', 'manhattan', 'minkowski']
         }
 
-        # If the best parameters exist, use them
-        if best_params:
-            model.set_params(**best_params)
+        # Default parameters
+        default_params = {
+            'n_neighbors': 5,
+            'weights': 'uniform',
+            'metric': 'minkowski'
+        }
+
+        if not args['enable_tuning']:
+            if best_params:
+                model.set_params(**best_params)
+            else:
+                model.set_params(**default_params)
             param_grid = {}
 
-        return train_and_evaluate_model(model, param_grid, 'KNeighbors', X_train, Y_train, X_test, Y_test, args['id_number'], metric, args['search_method'], n_iterations)
+        return train_and_evaluate_model(
+            model,
+            param_grid,
+            'KNeighbors',
+            X_train,
+            Y_train,
+            X_test,
+            Y_test,
+            args['id_number'],
+            args['metric'],
+            args['search_method'],
+            args['n_iterations'],
+            args['launch_dashboard']
+        )
+
     elif classifier == 'DecisionTree':
         # Step 1.7.3: Perform Classification using DecisionTree.
         try:
@@ -282,12 +182,37 @@ def classification(X_train, Y_train, X_test, Y_test, classifier, metric, **args)
             'max_features': ['auto', 'sqrt', 'log2', None]
         }
 
-        # If the best parameters exist, use them
-        if best_params:
-            model.set_params(**best_params)
+        # Default parameters
+        default_params = {
+            'criterion': 'gini',
+            'max_depth': None,
+            'min_samples_split': 2,
+            'min_samples_leaf': 1,
+            'max_features': None
+        }
+
+        if not args['enable_tuning']:
+            if best_params:
+                model.set_params(**best_params)
+            else:
+                model.set_params(**default_params)
             param_grid = {}
 
-        return train_and_evaluate_model(model, param_grid, 'DecisionTree', X_train, Y_train, X_test, Y_test, args['id_number'], metric, args['search_method'], n_iterations)
+        return train_and_evaluate_model(
+            model,
+            param_grid,
+            'DecisionTree',
+            X_train,
+            Y_train,
+            X_test,
+            Y_test,
+            args['id_number'],
+            args['metric'],
+            args['search_method'],
+            args['n_iterations'],
+            args['launch_dashboard']
+        )
+
     elif classifier == 'LogisticRegression':
         # Step 1.7.4: Perform Classification using LogisticRegression.
         try:
@@ -305,12 +230,36 @@ def classification(X_train, Y_train, X_test, Y_test, classifier, metric, **args)
             'max_iter': [100, 1000, 2500, 5000]
         }
 
-        # If the best parameters exist, use them
-        if best_params:
-            model.set_params(**best_params)
+        # Default parameters
+        default_params = {
+            'penalty': 'l2',
+            'C': 1.0,
+            'solver': 'lbfgs',
+            'max_iter': 100
+        }
+
+        if not args['enable_tuning']:
+            if best_params:
+                model.set_params(**best_params)
+            else:
+                model.set_params(**default_params)
             param_grid = {}
 
-        return train_and_evaluate_model(model, param_grid, 'LogisticRegression', X_train, Y_train, X_test, Y_test, args['id_number'], metric, args['search_method'], n_iterations)
+        return train_and_evaluate_model(
+            model,
+            param_grid,
+            'LogisticRegression',
+            X_train,
+            Y_train,
+            X_test,
+            Y_test,
+            args['id_number'],
+            args['metric'],
+            args['search_method'],
+            args['n_iterations'],
+            args['launch_dashboard']
+        )
+
     elif classifier == 'SVM':
         # Step 1.7.5: Perform Classification using SVM.
         try:
@@ -322,17 +271,40 @@ def classification(X_train, Y_train, X_test, Y_test, classifier, metric, **args)
 
         # Define the parameter grid
         param_grid = {
-            'C': [0.1, 1, 10, 100, 1000],  
-            'gamma': [1, 0.1, 0.01, 0.001, 0.0001], 
+            'C': [0.1, 1, 10, 100, 1000],
+            'gamma': [1, 0.1, 0.01, 0.001, 0.0001],
             'kernel': ['linear', 'poly', 'rbf', 'sigmoid']
         }
 
-        # If the best parameters exist, use them
-        if best_params:
-            model.set_params(**best_params)
+        # Default parameters
+        default_params = {
+            'C': 1.0,
+            'gamma': 'scale',
+            'kernel': 'rbf'
+        }
+
+        if not args['enable_tuning']:
+            if best_params:
+                model.set_params(**best_params)
+            else:
+                model.set_params(**default_params)
             param_grid = {}
 
-        return train_and_evaluate_model(model, param_grid, 'SVM', X_train, Y_train, X_test, Y_test, args['id_number'], metric, args['search_method'], n_iterations)
+        return train_and_evaluate_model(
+            model,
+            param_grid,
+            'SVM',
+            X_train,
+            Y_train,
+            X_test,
+            Y_test,
+            args['id_number'],
+            args['metric'],
+            args['search_method'],
+            args['n_iterations'],
+            args['launch_dashboard']
+        )
+
     elif classifier == 'XGB':
         # Step 1.7.7: Perform Classification using XGBoost.
         try:
@@ -354,12 +326,40 @@ def classification(X_train, Y_train, X_test, Y_test, classifier, metric, **args)
             'objective': ['binary:logistic']
         }
 
-        # If the best parameters exist, use them
-        if best_params:
-            model.set_params(**best_params)
+        # Default parameters
+        default_params = {
+            'learning_rate': 0.1,
+            'n_estimators': 100,
+            'max_depth': 3,
+            'min_child_weight': 1,
+            'gamma': 0.1,
+            'subsample': 1.0,
+            'colsample_bytree': 1.0,
+            'objective': 'binary:logistic'
+        }
+
+        if not args['enable_tuning']:
+            if best_params:
+                model.set_params(**best_params)
+            else:
+                model.set_params(**default_params)
             param_grid = {}
 
-        return train_and_evaluate_model(model, param_grid, 'XGB', X_train, Y_train, X_test, Y_test, args['id_number'], metric, args['search_method'], n_iterations)
+        return train_and_evaluate_model(
+            model,
+            param_grid,
+            'XGB',
+            X_train,
+            Y_train,
+            X_test,
+            Y_test,
+            args['id_number'],
+            args['metric'],
+            args['search_method'],
+            args['n_iterations'],
+            args['launch_dashboard']
+        )
+
     elif classifier == 'IsolationForest':
         # Step 1.7.9: Perform Classification using IsolationForest.
         try:
@@ -378,12 +378,37 @@ def classification(X_train, Y_train, X_test, Y_test, classifier, metric, **args)
             'bootstrap': [True, False]
         }
 
-        # If the best parameters exist, use them
-        if best_params:
-            model.set_params(**best_params)
+        # Default parameters
+        default_params = {
+            'n_estimators': 100,
+            'max_samples': 'auto',
+            'contamination': 'auto',
+            'max_features': 1.0,
+            'bootstrap': False
+        }
+
+        if not args['enable_tuning']:
+            if best_params:
+                model.set_params(**best_params)
+            else:
+                model.set_params(**default_params)
             param_grid = {}
 
-        return train_and_evaluate_model(model, param_grid, 'IsolationForest', X_train, Y_train, X_test, Y_test, args['id_number'], metric, args['search_method'], n_iterations)
+        return train_and_evaluate_model(
+            model,
+            param_grid,
+            'IsolationForest',
+            X_train,
+            Y_train,
+            X_test,
+            Y_test,
+            args['id_number'],
+            args['metric'],
+            args['search_method'],
+            args['n_iterations'],
+            args['launch_dashboard']
+        )
+
     elif classifier == 'ExtraTrees':
         try:
             best_params = load_best_params_from_json(classifier, args['id_number'])
@@ -392,17 +417,42 @@ def classification(X_train, Y_train, X_test, Y_test, classifier, metric, **args)
 
         model = ExtraTreesClassifier()
 
+        # Define the parameter grid
         param_grid = {
             'n_estimators': [100, 200, 300, 400, 500],
             'max_features': ['auto', 'sqrt', 'log2'],
             'bootstrap': [True, False]
         }
 
-        if best_params:
-            model.set_params(**best_params)
+        # Default parameters
+        default_params = {
+            'n_estimators': 100,
+            'max_features': 'auto',
+            'bootstrap': False
+        }
+
+        if not args['enable_tuning']:
+            if best_params:
+                model.set_params(**best_params)
+            else:
+                model.set_params(**default_params)
             param_grid = {}
 
-        return train_and_evaluate_model(model, param_grid, 'ExtraTreesClassifier', X_train, Y_train, X_test, Y_test, args['id_number'], metric, args['search_method'], n_iterations)
+        return train_and_evaluate_model(
+            model,
+            param_grid,
+            'ExtraTreesClassifier',
+            X_train,
+            Y_train,
+            X_test,
+            Y_test,
+            args['id_number'],
+            args['metric'],
+            args['search_method'],
+            args['n_iterations'],
+            args['launch_dashboard']
+        )
+
     elif classifier == 'GradientBoosting':
         try:
             best_params = load_best_params_from_json(classifier, args['id_number'])
@@ -411,6 +461,7 @@ def classification(X_train, Y_train, X_test, Y_test, classifier, metric, **args)
 
         model = GradientBoostingClassifier()
 
+        # Define the parameter grid
         param_grid = {
             'n_estimators': [100, 200, 300, 400, 500],
             'learning_rate': [0.1, 0.05, 0.01],
@@ -419,11 +470,37 @@ def classification(X_train, Y_train, X_test, Y_test, classifier, metric, **args)
             'min_samples_leaf': [1, 2, 5, 10]
         }
 
-        if best_params:
-            model.set_params(**best_params)
+        # Default parameters
+        default_params = {
+            'n_estimators': 100,
+            'learning_rate': 0.1,
+            'max_depth': 3,
+            'min_samples_split': 2,
+            'min_samples_leaf': 1
+        }
+
+        if not args['enable_tuning']:
+            if best_params:
+                model.set_params(**best_params)
+            else:
+                model.set_params(**default_params)
             param_grid = {}
 
-        return train_and_evaluate_model(model, param_grid, 'GradientBoostingClassifier', X_train, Y_train, X_test, Y_test, args['id_number'], metric, args['search_method'], n_iterations)
+        return train_and_evaluate_model(
+            model,
+            param_grid,
+            'GradientBoostingClassifier',
+            X_train,
+            Y_train,
+            X_test,
+            Y_test,
+            args['id_number'],
+            args['metric'],
+            args['search_method'],
+            args['n_iterations'],
+            args['launch_dashboard']
+        )
+
     elif classifier == 'NaiveBayes':
         # Step 1.7.6: Perform Classification using Naive Bayes.
         try:
@@ -437,103 +514,552 @@ def classification(X_train, Y_train, X_test, Y_test, classifier, metric, **args)
         # Naive Bayes does not have any hyperparameters that need to be tuned
         param_grid = {}
 
-        # If the best parameters exist, use them
-        if best_params:
-            model.set_params(**best_params)
+        # Default parameters
+        default_params = {}
 
-        return train_and_evaluate_model(model, param_grid, 'NaiveBayes', X_train, Y_train, X_test, Y_test, args['id_number'], metric, args['search_method'], n_iterations)
-    elif classifier == 'TCN':
-        # Step 1.7.6: Perform Classification using TCN. Subflowchart: TCN Subflowchart. Train and validate the network using TCN
-        # Initialize the TCNTrainer with the appropriate parameters
-        tcn_trainer = UnifiedTrainer(
-            model=args['net'],                      # The TCN model
-            optimizer=args['optimizer'],            # Optimizer for the model
-            epochs=args['epochs'],                  # Total number of epochs
-            batch_size=args['batch_size'],          # Batch size for training
-            lr=args['lr'],                          # Learning rate
-            reg=args['reg'],                        # Regularization parameter
-            id_number=args['id_number'],
-            model_type='TCN',
-            num_workers=args['num_workers']
+        if not args['enable_tuning']:
+            if best_params:
+                model.set_params(**best_params)
+            else:
+                model.set_params(**default_params)
+            param_grid = {}
+
+        return train_and_evaluate_model(
+            model,
+            param_grid,
+            'NaiveBayes',
+            X_train,
+            Y_train,
+            X_test,
+            Y_test,
+            args['id_number'],
+            args['metric'],
+            args['search_method'],
+            args['n_iterations'],
+            args['launch_dashboard']
         )
-        # Run training and testing using the TCNTrainer
-        return tcn_trainer.run(X_train, Y_train, X_test, Y_test)
-    elif classifier == 'LSTM':
-        # Step 1.7.7: Perform Classification using LSTM. Subflowchart: LSTM Subflowchart. Train and validate the network using LSTM
-        lstm_trainer = UnifiedTrainer(
-            model=args['net'],                      # The MLP model
-            optimizer=args['optimizer'],            # Optimizer for the model
-            epochs=args['epochs'],                  # Total number of epochs
-            batch_size=args['batch_size'],          # Batch size for training
-            lr=args['lr'],                          # Learning rate
-            reg=args['reg'],                        # Regularization parameter
-            id_number=args['id_number'],
-            model_type='LSTM',
-            num_workers=args['num_workers']
-        )
-        # Run training and testing using the TCNTrainer
-        return lstm_trainer.run(X_train, Y_train, X_test, Y_test)
-    elif classifier == 'NNet':
-        # Step 1.7.7: Perform Classification using LSTM. Subflowchart: LSTM Subflowchart. Train and validate the network using LSTM
-        nnet_trainer = UnifiedTrainer(
-            model=args['net'],                      # The MLP model
-            optimizer=args['optimizer'],            # Optimizer for the model
-            epochs=args['epochs'],                  # Total number of epochs
-            batch_size=args['batch_size'],          # Batch size for training
-            lr=args['lr'],                          # Learning rate
-            reg=args['reg'],                        # Regularization parameter
-            id_number=args['id_number'],
-            model_type='NNet',
-            num_workers=args['num_workers']
-        )
-        # Run training and testing using the TCNTrainer
-        return nnet_trainer.run(X_train, Y_train, X_test, Y_test)
-    elif classifier == 'DenseNet':
-        # Step 1.7.7: Perform Classification using LSTM. Subflowchart: LSTM Subflowchart. Train and validate the network using LSTM
-        densenet_trainer = UnifiedTrainer(
-            model=args['net'],                      # The MLP model
-            optimizer=args['optimizer'],            # Optimizer for the model
-            epochs=args['epochs'],                  # Total number of epochs
-            batch_size=args['batch_size'],          # Batch size for training
-            lr=args['lr'],                          # Learning rate
-            reg=args['reg'],                        # Regularization parameter
-            id_number=args['id_number'],
-            model_type='DenseNet',
-            num_workers=args['num_workers']
-        )
-        # Run training and testing using the TCNTrainer
-        return densenet_trainer.run(X_train, Y_train, X_test, Y_test)
-    elif classifier == 'MLP_Torch':
-        # Step 1.7.8: Perform Classification using MLP. Subflowchart: MLP Subflowchart. Train and validate the network using MLP
-        # Initialize the MLPTrainer with the appropriate parameters
-        mlp_trainer = UnifiedTrainer(
-            model=args['net'],                      # The MLP model
-            optimizer=args['optimizer'],            # Optimizer for the model
-            epochs=args['epochs'],                  # Total number of epochs
-            batch_size=args['batch_size'],          # Batch size for training
-            lr=args['lr'],                          # Learning rate
-            reg=args['reg'],                        # Regularization parameter
-            id_number=args['id_number'],
-            model_type='MLP',
-            num_workers=args['num_workers']
-        )
-        # Run training and testing using the MLPTrainer
-        return mlp_trainer.run(X_train, Y_train, X_test, Y_test)
-    elif classifier == 'MLP':
-        # Step 1.7.8: Perform Classification using MLP.
-        model = MLPClassifier()
-        
+
+    elif classifier == 'RGF':
+        # Step 1.7.7: Perform Classification using Regularized Greedy Forest (RGF).
+        try:
+            best_params = load_best_params_from_json(classifier, args['id_number'])
+        except FileNotFoundError:
+            best_params = None
+
+        model = RGFClassifier()
+
         # Define the parameter grid
         param_grid = {
-            'hidden_layer_sizes': [(50,50,50), (50,100,50), (100,)],
+            'max_leaf': [1000, 1200, 1500],
+            'algorithm': ["RGF", "RGF_Opt", "RGF_Sib"],
+            'test_interval': [100, 600, 900]
+        }
+
+        # Default parameters
+        default_params = {
+            'max_leaf': 1000,
+            'algorithm': 'RGF',
+            'test_interval': 100
+        }
+
+        if not args['enable_tuning']:
+            if best_params:
+                model.set_params(**best_params)
+            else:
+                model.set_params(**default_params)
+            param_grid = {}
+
+        return train_and_evaluate_model(
+            model,
+            param_grid,
+            'RGF',
+            X_train,
+            Y_train,
+            X_test,
+            Y_test,
+            args['id_number'],
+            args['metric'],
+            args['search_method'],
+            args['n_iterations'],
+            args['launch_dashboard']
+        )
+
+    elif classifier == 'TCN':
+        # Step 1.7.6: Perform Classification using TCN. Subflowchart: TCN Subflowchart. Train and validate the network using TCN
+        data = (Xtrain, ytrain, Xtest, ytest)
+
+        if args['enable_tuning']:
+            config = {
+                "epochs": TRAINING_PARAMS['epochs'],
+                "batch_size": TRAINING_PARAMS['batch_size'],
+                "lr": tune.loguniform(TRAINING_PARAMS['lr'] / 10, TRAINING_PARAMS['lr'] * 10),
+                "weight_decay": tune.loguniform(TRAINING_PARAMS['weight_decay'] / 10, TRAINING_PARAMS['weight_decay'] * 10),
+                "optimizer_type": TRAINING_PARAMS['optimizer_type'],
+                "reg": TRAINING_PARAMS['reg'],
+                "num_workers": TRAINING_PARAMS['num_workers'],
+                "scheduler_type": TRAINING_PARAMS['scheduler_type'],
+                "loss_function": TRAINING_PARAMS['loss_function']
+            }
+            if TRAINING_PARAMS['scheduler_type'] == 'StepLR':
+                config["scheduler_step_size"] = TRAINING_PARAMS['scheduler_step_size']
+                config["scheduler_gamma"] = TRAINING_PARAMS['scheduler_gamma']
+            elif TRAINING_PARAMS['scheduler_type'] == 'ExponentialLR':
+                config["scheduler_gamma"] = TRAINING_PARAMS['scheduler_gamma']
+            elif TRAINING_PARAMS['scheduler_type'] == 'ReduceLROnPlateau':
+                config["scheduler_factor"] = TRAINING_PARAMS['scheduler_factor']
+                config["scheduler_patience"] = TRAINING_PARAMS['scheduler_patience']
+
+            scheduler = ASHAScheduler(
+                metric="accuracy",
+                mode="max",
+                max_t=30,
+                grace_period=1,
+                reduction_factor=2
+            )
+
+            reporter = CLIReporter(
+                metric_columns=["accuracy", "training_iteration"]
+            )
+
+            result = tune.run(
+                tune.with_parameters(train_dl_model, data=data, enable_tuning=args['enable_tuning'], incremental_learning=args['incremental_learning'], transfer_learning=args['transfer_learning'], classifier='TCN', id_number=args['id_number']),
+                resources_per_trial={"cpu": 2, "gpu": 1},
+                config=config,
+                num_samples=10,
+                scheduler=scheduler,
+                progress_reporter=reporter
+            )
+
+            best_trial = result.get_best_trial("accuracy", "max", "last")
+            best_params = best_trial.config
+            print("Best trial config: {}".format(best_params))
+            print("Best trial final validation accuracy: {}".format(
+                best_trial.last_result["accuracy"]))
+
+            # Save the best parameters to a JSON file
+            save_best_params_to_json(best_params, classifier, args['id_number'])
+        else:
+            try:
+                config = load_best_params_from_json(classifier, args['id_number'])
+            except FileNotFoundError:
+                # Define a default config for non-tuning run
+                config = {
+                    "epochs": TRAINING_PARAMS['epochs'],
+                    "batch_size": TRAINING_PARAMS['batch_size'],
+                    "lr": TRAINING_PARAMS['lr'],
+                    "weight_decay": TRAINING_PARAMS['weight_decay'],
+                    "optimizer_type": TRAINING_PARAMS['optimizer_type'],
+                    "reg": TRAINING_PARAMS['reg'],
+                    "num_workers": TRAINING_PARAMS['num_workers'],
+                    "scheduler_type": TRAINING_PARAMS['scheduler_type'],
+                    "loss_function": TRAINING_PARAMS['loss_function']
+                }
+                if TRAINING_PARAMS['scheduler_type'] == 'StepLR':
+                    config["scheduler_step_size"] = TRAINING_PARAMS['scheduler_step_size']
+                    config["scheduler_gamma"] = TRAINING_PARAMS['scheduler_gamma']
+                elif TRAINING_PARAMS['scheduler_type'] == 'ExponentialLR':
+                    config["scheduler_gamma"] = TRAINING_PARAMS['scheduler_gamma']
+                elif TRAINING_PARAMS['scheduler_type'] == 'ReduceLROnPlateau':
+                    config["scheduler_factor"] = TRAINING_PARAMS['scheduler_factor']
+                    config["scheduler_patience"] = TRAINING_PARAMS['scheduler_patience']
+            train_dl_model(config, data, enable_tuning=args['enable_tuning'], incremental_learning=args['incremental_learning'], transfer_learning=args['transfer_learning'], classifier='TCN', id_number=args['id_number'])
+
+            # Save the selected parameters to a JSON file
+            save_best_params_to_json(config, classifier, args['id_number'])
+
+    elif classifier == 'LSTM':
+        # Step 1.7.7: Perform Classification using LSTM. Subflowchart: LSTM Subflowchart. Train and validate the network using LSTM
+        data = (Xtrain, ytrain, Xtest, ytest)
+
+        if args['enable_tuning']:
+            config = {
+                "epochs": TRAINING_PARAMS['epochs'],
+                "batch_size": TRAINING_PARAMS['batch_size'],
+                "lr": tune.loguniform(TRAINING_PARAMS['lr'] / 10, TRAINING_PARAMS['lr'] * 10),
+                "weight_decay": tune.loguniform(TRAINING_PARAMS['weight_decay'] / 10, TRAINING_PARAMS['weight_decay'] * 10),
+                "lstm_hidden_s": TRAINING_PARAMS['lstm_hidden_s'],
+                "fc1_hidden_s": TRAINING_PARAMS['fc1_hidden_s'],
+                "dropout": tune.uniform(0.2, 0.3, TRAINING_PARAMS['dropout']),
+                "optimizer_type": TRAINING_PARAMS['optimizer_type'],
+                "reg": TRAINING_PARAMS['reg'],
+                "num_workers": TRAINING_PARAMS['num_workers'],
+                "scheduler_type": TRAINING_PARAMS['scheduler_type'],
+                "loss_function": TRAINING_PARAMS['loss_function']
+            }
+            if TRAINING_PARAMS['scheduler_type'] == 'StepLR':
+                config["scheduler_step_size"] = TRAINING_PARAMS['scheduler_step_size']
+                config["scheduler_gamma"] = TRAINING_PARAMS['scheduler_gamma']
+            elif TRAINING_PARAMS['scheduler_type'] == 'ExponentialLR':
+                config["scheduler_gamma"] = TRAINING_PARAMS['scheduler_gamma']
+            elif TRAINING_PARAMS['scheduler_type'] == 'ReduceLROnPlateau':
+                config["scheduler_factor"] = TRAINING_PARAMS['scheduler_factor']
+                config["scheduler_patience"] = TRAINING_PARAMS['scheduler_patience']
+
+            scheduler = ASHAScheduler(
+                metric="accuracy",
+                mode="max",
+                max_t=30,
+                grace_period=1,
+                reduction_factor=2
+            )
+
+            reporter = CLIReporter(
+                metric_columns=["accuracy", "training_iteration"]
+            )
+
+            result = tune.run(
+                tune.with_parameters(train_dl_model, data=data, enable_tuning=args['enable_tuning'], incremental_learning=args['incremental_learning'], transfer_learning=args['transfer_learning'], classifier='FPLSTM', id_number=args['id_number']),
+                resources_per_trial={"cpu": 2, "gpu": 1},
+                config=config,
+                num_samples=10,
+                scheduler=scheduler,
+                progress_reporter=reporter
+            )
+
+            best_trial = result.get_best_trial("accuracy", "max", "last")
+            best_params = best_trial.config
+            print("Best trial config: {}".format(best_params))
+            print("Best trial final validation accuracy: {}".format(
+                best_trial.last_result["accuracy"]))
+
+            # Save the best parameters to a JSON file
+            save_best_params_to_json(best_params, classifier, args['id_number'])
+        else:
+            try:
+                config = load_best_params_from_json(classifier, args['id_number'])
+            except FileNotFoundError:
+                # Define a default config for non-tuning run
+                config = {
+                    "epochs": TRAINING_PARAMS['epochs'],
+                    "batch_size": TRAINING_PARAMS['batch_size'],
+                    "lr": TRAINING_PARAMS['lr'],
+                    "weight_decay": TRAINING_PARAMS['weight_decay'],
+                    "lstm_hidden_s": TRAINING_PARAMS['lstm_hidden_s'],
+                    "fc1_hidden_s": TRAINING_PARAMS['fc1_hidden_s'],
+                    "dropout": TRAINING_PARAMS['dropout'],
+                    "optimizer_type": TRAINING_PARAMS['optimizer_type'],
+                    "reg": TRAINING_PARAMS['reg'],
+                    "num_workers": TRAINING_PARAMS['num_workers'],
+                    "scheduler_type": TRAINING_PARAMS['scheduler_type'],
+                    "loss_function": TRAINING_PARAMS['loss_function']
+                }
+                if TRAINING_PARAMS['scheduler_type'] == 'StepLR':
+                    config["scheduler_step_size"] = TRAINING_PARAMS['scheduler_step_size']
+                    config["scheduler_gamma"] = TRAINING_PARAMS['scheduler_gamma']
+                elif TRAINING_PARAMS['scheduler_type'] == 'ExponentialLR':
+                    config["scheduler_gamma"] = TRAINING_PARAMS['scheduler_gamma']
+                elif TRAINING_PARAMS['scheduler_type'] == 'ReduceLROnPlateau':
+                    config["scheduler_factor"] = TRAINING_PARAMS['scheduler_factor']
+                    config["scheduler_patience"] = TRAINING_PARAMS['scheduler_patience']
+            train_dl_model(config, data, enable_tuning=args['enable_tuning'], incremental_learning=args['incremental_learning'], transfer_learning=args['transfer_learning'], classifier='FPLSTM', id_number=args['id_number'])
+
+            # Save the selected parameters to a JSON file
+            save_best_params_to_json(config, classifier, args['id_number'])
+
+    elif classifier == 'NNet':
+        # Step 1.7.7: Perform Classification using NNet. Subflowchart: NNet Subflowchart. Train and validate the network using NNet
+        data = (Xtrain, ytrain, Xtest, ytest)
+
+        if args['enable_tuning']:
+            config = {
+                "epochs": TRAINING_PARAMS['epochs'],
+                "batch_size": TRAINING_PARAMS['batch_size'],
+                "lr": tune.loguniform(TRAINING_PARAMS['lr'] / 10, TRAINING_PARAMS['lr'] * 10),
+                "weight_decay": tune.loguniform(TRAINING_PARAMS['weight_decay'] / 10, TRAINING_PARAMS['weight_decay'] * 10),
+                "hidden_dim": TRAINING_PARAMS['hidden_dim'],
+                "optimizer_type": TRAINING_PARAMS['optimizer_type'],
+                "reg": TRAINING_PARAMS['reg'],
+                "num_workers": TRAINING_PARAMS['num_workers'],
+                "scheduler_type": TRAINING_PARAMS['scheduler_type'],
+                "loss_function": TRAINING_PARAMS['loss_function']
+            }
+            if TRAINING_PARAMS['scheduler_type'] == 'StepLR':
+                config["scheduler_step_size"] = TRAINING_PARAMS['scheduler_step_size']
+                config["scheduler_gamma"] = TRAINING_PARAMS['scheduler_gamma']
+            elif TRAINING_PARAMS['scheduler_type'] == 'ExponentialLR':
+                config["scheduler_gamma"] = TRAINING_PARAMS['scheduler_gamma']
+            elif TRAINING_PARAMS['scheduler_type'] == 'ReduceLROnPlateau':
+                config["scheduler_factor"] = TRAINING_PARAMS['scheduler_factor']
+                config["scheduler_patience"] = TRAINING_PARAMS['scheduler_patience']
+
+            scheduler = ASHAScheduler(
+                metric="accuracy",
+                mode="max",
+                max_t=30,
+                grace_period=1,
+                reduction_factor=2
+            )
+
+            reporter = CLIReporter(
+                metric_columns=["accuracy", "training_iteration"]
+            )
+
+            result = tune.run(
+                tune.with_parameters(train_dl_model, data=data, enable_tuning=args['enable_tuning'], incremental_learning=args['incremental_learning'], transfer_learning=args['transfer_learning'], classifier='NNet', id_number=args['id_number']),
+                resources_per_trial={"cpu": 2, "gpu": 1},
+                config=config,
+                num_samples=10,
+                scheduler=scheduler,
+                progress_reporter=reporter
+            )
+
+            best_trial = result.get_best_trial("accuracy", "max", "last")
+            best_params = best_trial.config
+            print("Best trial config: {}".format(best_params))
+            print("Best trial final validation accuracy: {}".format(
+                best_trial.last_result["accuracy"]))
+
+            # Save the best parameters to a JSON file
+            save_best_params_to_json(best_params, classifier, args['id_number'])
+        else:
+            try:
+                config = load_best_params_from_json(classifier, args['id_number'])
+            except FileNotFoundError:
+                # Define a default config for non-tuning run
+                config = {
+                    "epochs": TRAINING_PARAMS['epochs'],
+                    "batch_size": TRAINING_PARAMS['batch_size'],
+                    "lr": TRAINING_PARAMS['lr'],
+                    "weight_decay": TRAINING_PARAMS['weight_decay'],
+                    "hidden_dim": TRAINING_PARAMS['hidden_dim'],
+                    "optimizer_type": TRAINING_PARAMS['optimizer_type'],
+                    "reg": TRAINING_PARAMS['reg'],
+                    "num_workers": TRAINING_PARAMS['num_workers'],
+                    "scheduler_type": TRAINING_PARAMS['scheduler_type'],
+                    "loss_function": TRAINING_PARAMS['loss_function']
+                }
+                if TRAINING_PARAMS['scheduler_type'] == 'StepLR':
+                    config["scheduler_step_size"] = TRAINING_PARAMS['scheduler_step_size']
+                    config["scheduler_gamma"] = TRAINING_PARAMS['scheduler_gamma']
+                elif TRAINING_PARAMS['scheduler_type'] == 'ExponentialLR':
+                    config["scheduler_gamma"] = TRAINING_PARAMS['scheduler_gamma']
+                elif TRAINING_PARAMS['scheduler_type'] == 'ReduceLROnPlateau':
+                    config["scheduler_factor"] = TRAINING_PARAMS['scheduler_factor']
+                    config["scheduler_patience"] = TRAINING_PARAMS['scheduler_patience']
+            train_dl_model(config, data, enable_tuning=args['enable_tuning'], incremental_learning=args['incremental_learning'], transfer_learning=args['transfer_learning'], classifier='NNet', id_number=args['id_number'])
+
+            # Save the selected parameters to a JSON file
+            save_best_params_to_json(config, classifier, args['id_number'])
+
+    elif classifier == 'DenseNet':
+        # Step 1.7.7: Perform Classification using LSTM. Subflowchart: LSTM Subflowchart. Train and validate the network using LSTM
+        data = (Xtrain, ytrain, Xtest, ytest)
+
+        if args['enable_tuning']:
+            config = {
+                "epochs": TRAINING_PARAMS['epochs'],
+                "batch_size": TRAINING_PARAMS['batch_size'],
+                "lr": tune.loguniform(1e-4, 1e-1, TRAINING_PARAMS['lr']),
+                "weight_decay": tune.loguniform(1e-5, 1e-2, TRAINING_PARAMS['weight_decay']),
+                "hidden_size": TRAINING_PARAMS['hidden_size'],
+                "optimizer_type": TRAINING_PARAMS['optimizer_type'],
+                "reg": TRAINING_PARAMS['reg'],
+                "num_workers": TRAINING_PARAMS['num_workers'],
+                "scheduler_type": TRAINING_PARAMS['scheduler_type'],
+                "loss_function": TRAINING_PARAMS['loss_function']
+            }
+            if TRAINING_PARAMS['scheduler_type'] == 'StepLR':
+                config["scheduler_step_size"] = TRAINING_PARAMS['scheduler_step_size']
+                config["scheduler_gamma"] = TRAINING_PARAMS['scheduler_gamma']
+            elif TRAINING_PARAMS['scheduler_type'] == 'ExponentialLR':
+                config["scheduler_gamma"] = TRAINING_PARAMS['scheduler_gamma']
+            elif TRAINING_PARAMS['scheduler_type'] == 'ReduceLROnPlateau':
+                config["scheduler_factor"] = TRAINING_PARAMS['scheduler_factor']
+                config["scheduler_patience"] = TRAINING_PARAMS['scheduler_patience']
+
+            scheduler = ASHAScheduler(
+                metric="accuracy",
+                mode="max",
+                max_t=30,
+                grace_period=1,
+                reduction_factor=2
+            )
+
+            reporter = CLIReporter(
+                metric_columns=["accuracy", "training_iteration"]
+            )
+
+            result = tune.run(
+                tune.with_parameters(train_dl_model, data=data, enable_tuning=args['enable_tuning'], incremental_learning=args['incremental_learning'], transfer_learning=args['transfer_learning'], classifier='DenseNet', id_number=args['id_number']),
+                resources_per_trial={"cpu": 2, "gpu": 1},
+                config=config,
+                num_samples=10,
+                scheduler=scheduler,
+                progress_reporter=reporter
+            )
+
+            best_trial = result.get_best_trial("accuracy", "max", "last")
+            best_params = best_trial.config
+            print("Best trial config: {}".format(best_params))
+            print("Best trial final validation accuracy: {}".format(
+                best_trial.last_result["accuracy"]))
+
+            # Save the best parameters to a JSON file
+            save_best_params_to_json(best_params, classifier, args['id_number'])
+        else:
+            try:
+                config = load_best_params_from_json(classifier, args['id_number'])
+            except FileNotFoundError:
+                # Define a default config for non-tuning run
+                config = {
+                    "epochs": TRAINING_PARAMS['epochs'],
+                    "batch_size": TRAINING_PARAMS['batch_size'],
+                    "lr": TRAINING_PARAMS['lr'],
+                    "weight_decay": TRAINING_PARAMS['weight_decay'],
+                    "hidden_size": TRAINING_PARAMS['hidden_size'],
+                    "optimizer_type": TRAINING_PARAMS['optimizer_type'],
+                    "reg": TRAINING_PARAMS['reg'],
+                    "num_workers": TRAINING_PARAMS['num_workers'],
+                    "scheduler_type": TRAINING_PARAMS['scheduler_type'],
+                    "loss_function": TRAINING_PARAMS['loss_function']
+                }
+                if TRAINING_PARAMS['scheduler_type'] == 'StepLR':
+                    config["scheduler_step_size"] = TRAINING_PARAMS['scheduler_step_size']
+                    config["scheduler_gamma"] = TRAINING_PARAMS['scheduler_gamma']
+                elif TRAINING_PARAMS['scheduler_type'] == 'ExponentialLR':
+                    config["scheduler_gamma"] = TRAINING_PARAMS['scheduler_gamma']
+                elif TRAINING_PARAMS['scheduler_type'] == 'ReduceLROnPlateau':
+                    config["scheduler_factor"] = TRAINING_PARAMS['scheduler_factor']
+                    config["scheduler_patience"] = TRAINING_PARAMS['scheduler_patience']
+            train_dl_model(config, data, enable_tuning=args['enable_tuning'], incremental_learning=args['incremental_learning'], transfer_learning=args['transfer_learning'], classifier='DenseNet', id_number=args['id_number'])
+
+            # Save the selected parameters to a JSON file
+            save_best_params_to_json(config, classifier, args['id_number'])
+    elif classifier == 'MLP_Torch':
+        data = (Xtrain, ytrain, Xtest, ytest)
+        # Step 1.7.8: Perform Classification using MLP. Subflowchart: MLP Subflowchart. Train and validate the network using MLP
+        if args['enable_tuning']:
+            config = {
+                "epochs": TRAINING_PARAMS['epochs'],
+                "batch_size": TRAINING_PARAMS['batch_size'],
+                "lr": tune.loguniform(TRAINING_PARAMS['lr'] / 10, TRAINING_PARAMS['lr'] * 10),
+                "weight_decay": tune.loguniform(TRAINING_PARAMS['weight_decay'] / 10, TRAINING_PARAMS['weight_decay'] * 10),  # L2 regularization parameter
+                "hidden_dim": TRAINING_PARAMS['hidden_dim'],
+                "optimizer_type": TRAINING_PARAMS['optimizer_type'],
+                "reg": TRAINING_PARAMS['reg'],
+                "num_workers": TRAINING_PARAMS['num_workers'],
+                "scheduler_type": TRAINING_PARAMS['scheduler_type'],
+                "loss_function": TRAINING_PARAMS['loss_function']
+            }
+            if TRAINING_PARAMS['scheduler_type'] == 'StepLR':
+                config["scheduler_step_size"] = TRAINING_PARAMS['scheduler_step_size']
+                config["scheduler_gamma"] = TRAINING_PARAMS['scheduler_gamma']
+            elif TRAINING_PARAMS['scheduler_type'] == 'ExponentialLR':
+                config["scheduler_gamma"] = TRAINING_PARAMS['scheduler_gamma']
+            elif TRAINING_PARAMS['scheduler_type'] == 'ReduceLROnPlateau':
+                config["scheduler_factor"] = TRAINING_PARAMS['scheduler_factor']
+                config["scheduler_patience"] = TRAINING_PARAMS['scheduler_patience']
+
+            scheduler = ASHAScheduler(
+                metric="accuracy",
+                mode="max",
+                max_t=30,
+                grace_period=1,
+                reduction_factor=2
+            )
+
+            reporter = CLIReporter(
+                metric_columns=["accuracy", "training_iteration"]
+            )
+
+            result = tune.run(
+                tune.with_parameters(train_dl_model, data=data, enable_tuning=args['enable_tuning'], incremental_learning=args['incremental_learning'], transfer_learning=args['transfer_learning'], classifier='MLP', id_number=args['id_number']),
+                resources_per_trial={"cpu": 2, "gpu": 1},
+                config=config,
+                num_samples=10,
+                scheduler=scheduler,
+                progress_reporter=reporter
+            )
+
+            best_trial = result.get_best_trial("accuracy", "max", "last")
+            best_params = best_trial.config
+            print("Best trial config: {}".format(best_params))
+            print("Best trial final validation accuracy: {}".format(
+                best_trial.last_result["accuracy"]))
+
+            # Save the best parameters to a JSON file
+            save_best_params_to_json(best_params, classifier, args['id_number'])
+        else:
+            try:
+                config = load_best_params_from_json(classifier, args['id_number'])
+            except FileNotFoundError:
+                # Define a default config for non-tuning run
+                config = {
+                    "epochs": TRAINING_PARAMS['epochs'],
+                    "batch_size": TRAINING_PARAMS['batch_size'],
+                    "lr": tune.loguniform(TRAINING_PARAMS['lr'] / 10, TRAINING_PARAMS['lr'] * 10),
+                    "weight_decay": tune.loguniform(TRAINING_PARAMS['weight_decay'] / 10, TRAINING_PARAMS['weight_decay'] * 10),  # L2 regularization parameter,
+                    "hidden_dim": TRAINING_PARAMS['hidden_dim'],
+                    "optimizer_type": TRAINING_PARAMS['optimizer_type'],
+                    "reg": TRAINING_PARAMS['reg'],
+                    "num_workers": TRAINING_PARAMS['num_workers'],
+                    "scheduler_type": TRAINING_PARAMS['scheduler_type'],
+                    "loss_function": TRAINING_PARAMS['loss_function']
+                }
+                if TRAINING_PARAMS['scheduler_type'] == 'StepLR':
+                    config["scheduler_step_size"] = TRAINING_PARAMS['scheduler_step_size']
+                    config["scheduler_gamma"] = TRAINING_PARAMS['scheduler_gamma']
+                elif TRAINING_PARAMS['scheduler_type'] == 'ExponentialLR':
+                    config["scheduler_gamma"] = TRAINING_PARAMS['scheduler_gamma']
+                elif TRAINING_PARAMS['scheduler_type'] == 'ReduceLROnPlateau':
+                    config["scheduler_factor"] = TRAINING_PARAMS['scheduler_factor']
+                    config["scheduler_patience"] = TRAINING_PARAMS['scheduler_patience']
+            train_dl_model(config, data, enable_tuning=args['enable_tuning'], incremental_learning=args['incremental_learning'], transfer_learning=args['transfer_learning'], classifier='MLP', id_number=args['id_number'])
+
+            # Save the selected parameters to a JSON file
+            save_best_params_to_json(config, classifier, args['id_number'])
+
+    elif classifier == 'MLP':
+        # Step 1.7.8: Perform Classification using MLP.
+        try:
+            best_params = load_best_params_from_json(classifier, args['id_number'])
+        except FileNotFoundError:
+            best_params = None
+
+        model = MLPClassifier()
+
+        # Define the parameter grid
+        param_grid = {
+            'hidden_layer_sizes': [(50, 50, 50), (50, 100, 50), (100,)],
             'activation': ['tanh', 'relu'],
             'solver': ['sgd', 'adam'],
             'alpha': [0.0001, 0.05],
-            'learning_rate': ['constant','adaptive'],
+            'learning_rate': ['constant', 'adaptive'],
             'max_iter': [200, 500, 1000]
         }
 
-        return train_and_evaluate_model(model, param_grid, 'MLP', X_train, Y_train, X_test, Y_test, args['id_number'], metric, args['search_method'], n_iterations)
+        # Default parameters
+        default_params = {
+            'hidden_layer_sizes': (100,),
+            'activation': 'relu',
+            'solver': 'adam',
+            'alpha': 0.0001,
+            'learning_rate': 'constant',
+            'max_iter': 200
+        }
+
+        if not args['enable_tuning']:
+            if best_params:
+                model.set_params(**best_params)
+            else:
+                model.set_params(**default_params)
+            param_grid = {}
+
+        return train_and_evaluate_model(
+            model,
+            param_grid,
+            'MLP',
+            X_train,
+            Y_train,
+            X_test,
+            Y_test,
+            args['id_number'],
+            args['metric'],
+            args['search_method'],
+            args['n_iterations'],
+            args['launch_dashboard']
+        )
+
     elif classifier == 'DBSCAN':
         # Step 1.7.3: Perform Classification using DBSCAN.
         try:
@@ -551,99 +1077,79 @@ def classification(X_train, Y_train, X_test, Y_test, classifier, metric, **args)
             'metric': ['euclidean', 'manhattan', 'chebyshev']
         }
 
-        # If the best parameters exist, use them
-        if best_params:
-            model.set_params(**best_params)
+        # Default parameters
+        default_params = {
+            'eps': 0.5,
+            'min_samples': 5,
+            'leaf_size': 30,
+            'metric': 'euclidean'
+        }
+
+        if not args['enable_tuning']:
+            if best_params:
+                model.set_params(**best_params)
+            else:
+                model.set_params(**default_params)
             param_grid = {}
 
-        return train_and_evaluate_model(model, param_grid, 'DBSCAN', X_train, Y_train, X_test, Y_test, args['id_number'], metric, args['search_method'], n_iterations)
-
-def factors(n):
-    """
-    Returns a list of factors of the given number.
-
-    Parameters:
-    - n (int): The number to find the factors of.
-
-    Returns:
-    list: A list of factors of the given number.
-    """
-    factors = []
-    # Check for the smallest prime factor 2
-    while n % 2 == 0:
-        factors.append(2)
-        n //= 2
-    # Check for odd factors from 3 upwards
-    factor = 3
-    while factor * factor <= n:
-        while n % factor == 0:
-            factors.append(factor)
-            n //= factor
-        factor += 2
-    # If n became a prime number greater than 2
-    if n > 1:
-        factors.append(n)
-    return factors
-
-def save_params_to_json(df, *args):
-    """
-    Save the parameters to a JSON file.
-
-    Args:
-        df (DataFrame): The input DataFrame.
-        *args: Variable length argument list containing the parameter values.
-
-    Returns:
-        str: The file path where the parameters are saved.
-    """
-    # Define parameter names and create a dictionary of params
-    param_names = [
-        'model', 'id_number', 'years', 'test_type','windowing', 'min_days_hdd', 'days_considered_as_failure',
-        'test_train_percentage', 'oversample_undersample', 'balancing_normal_failed',
-        'history_signal', 'classifier', 'features_extraction_method', 'cuda_dev',
-        'ranking', 'num_features', 'overlap', 'split_technique', 'interpolate_technique',
-        'search_method', 'fillna_method', 'pca_components'
-    ]
-
-    # Assign values directly from the dictionary
-    params = dict(zip(param_names, args))
-
-    # Get column names that start with 'smart_'
-    smart_columns = [col for col in df.columns if col.startswith('smart_')]
-
-    # Add smart_columns to params under the key 'smart_attributes'
-    params['smart_attributes'] = smart_columns
-
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    now_str = datetime.now().strftime("%Y%m%d_%H%M%S")
-    param_dir = os.path.join(script_dir, '..', 'model', params['id_number'])
-
-    # Create the directory if it doesn't exist
-    if not os.path.exists(param_dir):
-        os.makedirs(param_dir)
-
-    logger.info(f'User parameters: {params}')
-
-    # Define the file path
-    file_path = os.path.join(param_dir, f"{params['classifier'].lower()}_{params['id_number']}_params_{now_str}.json")
-
-    # Write the params dictionary to a JSON file
-    with open(file_path, 'w') as f:
-        json.dump(params, f)
-
-    logger.info(f'Parameters saved to: {file_path}')
-
-    return file_path
+        return train_and_evaluate_model(
+            model,
+            param_grid,
+            'DBSCAN',
+            X_train,
+            Y_train,
+            X_test,
+            Y_test,
+            args['id_number'],
+            args['metric'],
+            args['search_method'],
+            args['n_iterations'],
+            args['launch_dashboard']
+        )
 
 def set_training_params(*args):
-    param_names = ['reg', 'batch_size', 'lr', 'weight_decay', 'epochs', 'dropout', 'lstm_hidden_s', 'fc1_hidden_s', 'hidden_dim', 'hidden_size', 'num_layers', 'optimizer_type', 'num_workers']
+    """
+    Set the training parameters for the model.
+
+    Args:
+        *args: Variable number of arguments representing the training parameters.
+
+    Returns:
+        str: A string indicating that the parameters have been successfully updated.
+
+    """
+    param_names = [
+        'reg',
+        'batch_size',
+        'lr',
+        'weight_decay',
+        'epochs',
+        'dropout',
+        'lstm_hidden_s',
+        'fc1_hidden_s',
+        'hidden_dim',
+        'hidden_size',
+        'num_layers',
+        'optimizer_type',
+        'num_workers',
+        'scheduler_type',
+        'scheduler_factor',
+        'scheduler_patience',
+        'scheduler_step_size',
+        'scheduler_gamma',
+        'loss_function'
+    ]
     # Use the global keyword when modifying global variables
-    global TRAINING_PARAMS
+    global TRAINING_PARAMS # pylint: disable=global-statement
     TRAINING_PARAMS = dict(zip(param_names, args))
     # Print out updated parameters to Gradio interface
-    return f"Parameters successfully updated:\n" + "\n".join([f"{key}: {value}" for key, value in TRAINING_PARAMS.items()])
+    return "Parameters successfully updated:\n" + "\n".join([f"{key}: {value}" for key, value in TRAINING_PARAMS.items()])
 
 def initialize_classification(*args):
+    ray.init()
+
+    os.environ["MODIN_ENGINE"] = "ray"  # Use ray as the execution engine
+
     # ------------------ #
     # Feature Selection Subflowchart
     # Step 1: Define empty lists and dictionary
@@ -696,21 +1202,27 @@ def initialize_classification(*args):
     
     # Define parameter names and create a dictionary of params
     param_names = [
-        'model', 'id_number', 'years', 'test_type', 'windowing', 'min_days_hdd', 'days_considered_as_failure',
+        'manufacturer', 'model', 'id_number', 'years', 'test_type', 'windowing', 'min_days_hdd', 'days_considered_as_failure',
         'test_train_percentage', 'oversample_undersample', 'balancing_normal_failed',
         'history_signal', 'classifier', 'features_extraction_method', 'cuda_dev',
         'ranking', 'num_features', 'overlap', 'split_technique', 'interpolate_technique',
-        'search_method', 'fillna_method', 'pca_components'
+        'search_method', 'fillna_method', 'pca_components', 'smoothing_level', 'incremental_learning', 'transfer_learning', 'partition_models',
+        'enable_tuning', 'enable_ga_algorithm', 'number_pop', 'number_gen', 'apply_weighted_feature', 'max_wavelet_scales'
+        'launch_dashboard'
     ]
 
     # Assign values directly from the dictionary
     (
-        model, id_number, years, test_type, windowing, min_days_HDD, days_considered_as_failure,
+        manufacturer, model, id_number, years, test_type, windowing, min_days_HDD, days_considered_as_failure,
         test_train_perc, oversample_undersample, balancing_normal_failed,
         history_signal, classifier, features_extraction_method, CUDA_DEV,
         ranking, num_features, overlap, split_technique, interpolate_technique,
-        search_method, fillna_method, pca_components
+        search_method, fillna_method, pca_components, smoothing_level, incremental_learning, transfer_learning, partition_models,
+        enable_tuning, enable_ga_algorithm, number_pop, number_gen, apply_weighted_feature, max_wavelet_scales,
+        launch_dashboard
     ) = dict(zip(param_names, args)).values()
+    models = [m.strip() for m in model.split(',')]
+    model_string = "_".join(models)
     # here you can select the model. This is the one tested.
     # Correct years for the model
     # Select the statistical methods to extract features
@@ -747,13 +1259,18 @@ def initialize_classification(*args):
 
     try:
         # Step 1: Load the dataset from pkl file.
-        df = pd.read_pickle(os.path.join(script_dir, '..', 'output', f'{model}_Dataset_selected_windowed_{history_signal}_rank_{ranking}_{num_features}_overlap_{overlap}.pkl'))
-    except:
+        df = pd.read_pickle(os.path.join(script_dir, '..', 'output', f'{model_string}_Dataset_selected_windowed_{history_signal}_rank_{ranking}_{num_features}_overlap_{overlap}.pkl'))
+        logger.info(f'Loading file from pickle file: {model_string}_Dataset_selected_windowed_{history_signal}_rank_{ranking}_{num_features}_overlap_{overlap}.pkl')
+    except: # pylint: disable=bare-except
         # Step 1.1: Import the dataset from the raw data.
         if ranking == 'None':
-            df = import_data(years=years, model=model, name='iSTEP', features=features)
+            df = import_data(years=years, models=models, name='iSTEP', features=features, manufacturer=manufacturer)
         else:
-            df = import_data(years=years, model=model, name='iSTEP')
+            df = import_data(years=years, models=models, name='iSTEP', manufacturer=manufacturer)
+
+        # Check if the DataFrame is empty
+        if df.empty:
+            raise ValueError("The DataFrame is empty. Please check your data source.")
 
         logger.info('Data imported successfully, processing smart attributes...')
         for column in list(df):
@@ -771,28 +1288,147 @@ def initialize_classification(*args):
         df['validate_val'] = valid_list
 
         if ranking != 'None':
+            enable_ga_algorithm = True
             # Step 1.4: Feature Selection: Subflow chart of Main Classification Process
-            df = feature_selection(df, num_features, test_type)
+            # n_pop: Number of individuals in each generation
+            # n_gen: Stop the genetic algorithm after certain generations
+            df, feature_weights = feature_selection(df, num_features, test_type, enable_ga_algorithm, n_pop=number_pop, n_gen=number_gen)
         logger.info('Used features')
         for column in list(df):
             logger.info(f'{column:<27}.')
-        logger.info(f'Saving to pickle file: {model}_Dataset_selected_windowed_{history_signal}_rank_{ranking}_{num_features}_overlap_{overlap}.pkl')
-        df.to_pickle(os.path.join(output_dir, f'{model}_Dataset_selected_windowed_{history_signal}_rank_{ranking}_{num_features}_overlap_{overlap}.pkl'))
+        logger.info(f'Saving to pickle file: {model_string}_Dataset_selected_windowed_{history_signal}_rank_{ranking}_{num_features}_overlap_{overlap}.pkl')
+        df.to_pickle(os.path.join(output_dir, f'{model_string}_Dataset_selected_windowed_{history_signal}_rank_{ranking}_{num_features}_overlap_{overlap}.pkl'))
 
     # Interpolate data for the rows with missing dates
     if interpolate_technique != 'None':
         df = interpolate_ts(df, method=interpolate_technique)
 
+    if manufacturer != 'custom' and partition_models == True:
+        relevant_models, irrelevant_models = find_relevant_models(df)
+        # Filter the original DataFrame based on the 'model' column
+        relevant_df = df[df['model'].isin(relevant_models)]
+        irrelevant_df = df[df['model'].isin(irrelevant_models)]
+
     # Saving parameters to json file
     logger.info('Saving parameters to json file...')
     param_path = save_params_to_json(
-        df, model, id_number, years, test_type, windowing, min_days_HDD, days_considered_as_failure,
+        df, model_string, id_number, years, test_type, windowing, min_days_HDD, days_considered_as_failure,
         test_train_perc, oversample_undersample, balancing_normal_failed,
         history_signal, classifier, features_extraction_method, CUDA_DEV,
         ranking, num_features, overlap, split_technique, interpolate_technique,
-        search_method, fillna_method, pca_components
+        search_method, enable_tuning, fillna_method, pca_components, smoothing_level, max_wavelet_scales
     )
 
+    if transfer_learning:
+        if partition_models == True:
+            # Partition the dataset into training and testing sets for the relevant_df
+            Xtrain, ytrain, Xtest, ytest = initialize_partitioner(
+                relevant_df, output_dir, model_string, windowing, test_train_perc, 
+                oversample_undersample, balancing_normal_failed, history_signal, 
+                classifier, features_extraction_method, ranking, num_features, 
+                overlap, split_technique, fillna_method, pca_components, smoothing_level,
+                apply_weighted_feature, feature_weights, max_wavelet_scales
+            )
+
+            # Perform classification for the relevant_df
+            perform_classification(Xtrain, ytrain, Xtest, ytest, id_number, 
+                classifier, CUDA_DEV, search_method, enable_tuning, incremental_learning, False,
+                launch_dashboard, param_path
+            )
+
+            # Partition the dataset into training and testing sets for the irrelevant_df
+            Xtrain, ytrain, Xtest, ytest = initialize_partitioner(
+                irrelevant_df, output_dir, model_string, windowing, test_train_perc, 
+                oversample_undersample, balancing_normal_failed, history_signal, 
+                classifier, features_extraction_method, ranking, num_features, 
+                overlap, split_technique, fillna_method, pca_components, smoothing_level,
+                apply_weighted_feature, feature_weights, max_wavelet_scales
+            )
+
+            # Perform classification for the irrelevant_df
+            return perform_classification(Xtrain, ytrain, Xtest, ytest, id_number, 
+                classifier, CUDA_DEV, search_method, enable_tuning, incremental_learning, True,
+                launch_dashboard, param_path
+            )
+        else:
+            # Partition the dataset into training and testing sets for the irrelevant_df
+            Xtrain, ytrain, Xtest, ytest = initialize_partitioner(
+                df, output_dir, model_string, windowing, test_train_perc, 
+                oversample_undersample, balancing_normal_failed, history_signal, 
+                classifier, features_extraction_method, ranking, num_features, 
+                overlap, split_technique, fillna_method, pca_components, smoothing_level,
+                apply_weighted_feature, feature_weights, max_wavelet_scales
+            )
+
+            # Perform classification for the irrelevant_df
+            return perform_classification(Xtrain, ytrain, Xtest, ytest, id_number, 
+                classifier, CUDA_DEV, search_method, enable_tuning, incremental_learning, True,
+                launch_dashboard, param_path
+            )
+    else:
+        if partition_models == False:
+            # Partition the dataset into training and testing sets for entire df
+            Xtrain, ytrain, Xtest, ytest = initialize_partitioner(
+                df, output_dir, model_string, windowing, test_train_perc, 
+                oversample_undersample, balancing_normal_failed, history_signal, 
+                classifier, features_extraction_method, ranking, num_features, 
+                overlap, split_technique, fillna_method, pca_components, smoothing_level,
+                apply_weighted_feature, feature_weights, max_wavelet_scales
+            )
+
+        else:
+            # Partition the dataset into training and testing sets for relevant_df
+            Xtrain, ytrain, Xtest, ytest = initialize_partitioner(
+                relevant_df, output_dir, model_string, windowing, test_train_perc, 
+                oversample_undersample, balancing_normal_failed, history_signal, 
+                classifier, features_extraction_method, ranking, num_features, 
+                overlap, split_technique, fillna_method, pca_components, smoothing_level,
+                apply_weighted_feature, feature_weights, max_wavelet_scales
+            )
+
+        # Perform classification for the relevant_df
+        return perform_classification(Xtrain, ytrain, Xtest, ytest, id_number, 
+            classifier, CUDA_DEV, search_method, enable_tuning, incremental_learning, False,
+            launch_dashboard, param_path
+        )
+
+def apply_feature_weights(data, feature_weights):
+    """
+    Applies the feature weights to the input training data.
+
+    Args:
+        data (pd.DataFrame): The input training data.
+        feature_weights (dict): A dictionary with feature names as keys and their weights as values.
+
+    Returns:
+        pd.DataFrame: The weighted input training data.
+    """
+    if feature_weights is not None:
+        for feature, weight in feature_weights.items():
+            if feature in data.columns:
+                data[feature] *= weight
+    return data
+
+def initialize_partitioner(df, *args):
+    # Define parameter names and create a dictionary of params
+    param_names = [
+        'output_dir', 'model_string', 'windowing',
+        'test_train_percentage', 'oversample_undersample', 'balancing_normal_failed',
+        'history_signal', 'classifier', 'features_extraction_method',
+        'ranking', 'num_features', 'overlap', 'split_technique', 'interpolate_technique',
+        'search_method', 'fillna_method', 'pca_components', 'smoothing_level',
+        'apply_weighted_feature', 'feature_weights', 'max_wavelet_scales'
+    ]
+
+    # Assign values directly from the dictionary
+    (
+        output_dir, model_string, windowing, 
+        test_train_perc, oversample_undersample, balancing_normal_failed,
+        history_signal, classifier, features_extraction_method,
+        ranking, num_features, overlap, split_technique,
+        fillna_method, pca_components, smoothing_level,
+        apply_weighted_feature, feature_weights, max_wavelet_scales
+    ) = dict(zip(param_names, args)).values()
     ## -------- ##
     # random: stratified without keeping time order
     # hdd --> separate different hdd (need FIXes)
@@ -800,7 +1436,7 @@ def initialize_classification(*args):
     # Step 1.5: Partition the dataset into training and testing sets. Partition Dataset: Subflow chart of Main Classification Process
     Xtrain, Xtest, ytrain, ytest = DatasetPartitioner(
         df,
-        model,
+        model_string,
         overlap=overlap,
         rank=ranking,
         num_features=num_features,
@@ -810,16 +1446,18 @@ def initialize_classification(*args):
         window_dim=history_signal,
         resampler_balancing=balancing_normal_failed,
         oversample_undersample=oversample_undersample,
-        fillna_method=fillna_method
+        fillna_method=fillna_method,
+        smoothing_level=smoothing_level,
+        max_wavelet_scales=max_wavelet_scales
     )
-    
+
     # Print the line of Xtrain and Xtest
     logger.info(f'Xtrain shape: {Xtrain.shape}, Xtest shape: {Xtest.shape}')
 
     try:
-        data = np.load(os.path.join(output_dir, f'{model}_training_and_testing_data_{history_signal}_rank_{ranking}_{num_features}_overlap_{overlap}_features_extraction_method_{features_extraction_method}_oversample_undersample_{oversample_undersample}.npz'))
+        data = np.load(os.path.join(output_dir, f'{model_string}_training_and_testing_data_{history_signal}_rank_{ranking}_{num_features}_overlap_{overlap}_features_extraction_method_{features_extraction_method}_oversample_undersample_{oversample_undersample}.npz'))
         Xtrain, Xtest, ytrain, ytest = data['Xtrain'], data['Xtest'], data['Ytrain'], data['Ytest']
-    except:
+    except: # pylint: disable=bare-except
         # Step x.1: Feature Extraction
         if features_extraction_method == 'custom':
             # Extract features for the train and test set
@@ -830,220 +1468,16 @@ def initialize_classification(*args):
             Xtest = feature_extraction_PCA(Xtest, pca_components)
         elif features_extraction_method == 'None':
             logger.info('Skipping features extraction for training data.')
+            if apply_weighted_feature == True:
+                # Apply feature weights to the training and testing data
+                Xtrain = apply_feature_weights(Xtrain, feature_weights)
+                Xtest = apply_feature_weights(Xtest, feature_weights)
         else:
             raise ValueError('Invalid features extraction method. Please choose either "custom" or "pca" or "None".')
+        logger.info(f'Saving training and testing data to file: {model_string}_training_and_testing_data_{history_signal}_rank_{ranking}_{num_features}_overlap_{overlap}_features_extraction_method_{features_extraction_method}_oversample_undersample_{oversample_undersample}.npz')
         # Save the arrays to a .npz file
-        np.savez(os.path.join(output_dir, f'{model}_training_and_testing_data_{history_signal}_rank_{ranking}_{num_features}_overlap_{overlap}_features_extraction_method_{features_extraction_method}_oversample_undersample_{oversample_undersample}.npz'), Xtrain=Xtrain, Xtest=Xtest, Ytrain=ytrain, Ytest=ytest)
+        np.savez(os.path.join(output_dir, f'{model_string}_training_and_testing_data_{history_signal}_rank_{ranking}_{num_features}_overlap_{overlap}_features_extraction_method_{features_extraction_method}_oversample_undersample_{oversample_undersample}.npz'), Xtrain=Xtrain, Xtest=Xtest, Ytrain=ytrain, Ytest=ytest)
 
-    # Step 1.6: Classifier Selection: set training parameters
-    ####### CLASSIFIER PARAMETERS #######
-    if CUDA_DEV != 'None':
-        os.environ["CUDA_VISIBLE_DEVICES"] = CUDA_DEV
-    if classifier == 'TCN':
-        # Step 1.6.1: Set training parameters for TCN. Subflowchart: TCN Subflowchart.
-        batch_size = TRAINING_PARAMS['batch_size']
-        lr = TRAINING_PARAMS['lr']
-        weight_decay = TRAINING_PARAMS['weight_decay']  # L2 regularization parameter
-        epochs = TRAINING_PARAMS['epochs']
-        optimizer_type = TRAINING_PARAMS['optimizer_type']
-        reg = TRAINING_PARAMS['reg']
-        num_workers = TRAINING_PARAMS['num_workers']
-        # Calculate the data dimension based on the shape of the training data, the dimension of the Xtrain is the same as Xtest
-        data_dim = Xtrain.shape[2]
-        num_inputs = Xtrain.shape[1]
-        logger.info(f'number of inputes: {num_inputs}, data_dim: {data_dim}')
-        net = TCN_Network(data_dim, num_inputs)
-        if torch.cuda.is_available():
-            logger.info('Moving model to cuda')
-            net.cuda()
-        else:
-            logger.info('Model to cpu')
-        if optimizer_type == 'Adam':
-            # We use the Adam optimizer, a method for Stochastic Optimization
-            optimizer = optim.Adam(net.parameters(), lr=lr, weight_decay=weight_decay)
-        elif optimizer_type == 'SGD':
-            # We use the Stochastic Gradient Descent optimizer
-            optimizer = optim.SGD(net.parameters(), lr=lr, weight_decay=weight_decay)
-        else:
-            raise ValueError('Invalid optimizer type. Please choose either "Adam" or "SGD".')
-
-        # Define the best parameters
-        best_params = {
-            'batch_size': batch_size,
-            'lr': lr,
-            'weight_decay': weight_decay,
-            'epochs': epochs,
-            'reg': reg,
-        }
-
-        # Save the best parameters to a JSON file
-        save_best_params_to_json(best_params, classifier, id_number)
-    elif classifier == 'LSTM':
-        # Step 1.6.2: Set training parameters for LSTM. Subflowchart: LSTM Subflowchart.
-        lr = TRAINING_PARAMS['lr']
-        weight_decay = TRAINING_PARAMS['weight_decay']  # L2 regularization parameter
-        batch_size = TRAINING_PARAMS['batch_size']
-        epochs = TRAINING_PARAMS['epochs']
-        dropout = TRAINING_PARAMS['dropout']
-        # Hidden state sizes (from [14])
-        # The dimensionality of the output space of the LSTM layer
-        lstm_hidden_s = TRAINING_PARAMS['lstm_hidden_s']
-        # The dimensionality of the output space of the first fully connected layer
-        fc1_hidden_s = TRAINING_PARAMS['fc1_hidden_s']
-        optimizer_type = TRAINING_PARAMS['optimizer_type']
-        reg = TRAINING_PARAMS['reg']
-        num_workers = TRAINING_PARAMS['num_workers']
-        num_inputs = Xtrain.shape[1]
-        net = FPLSTM(lstm_hidden_s, fc1_hidden_s, num_inputs, 2, dropout)
-        if torch.cuda.is_available():
-            logger.info('Moving model to cuda')
-            net.cuda()
-        else:
-            logger.info('Model to cpu')
-        if optimizer_type == 'Adam':
-            # We use the Adam optimizer, a method for Stochastic Optimization
-            optimizer = optim.Adam(net.parameters(), lr=lr, weight_decay=weight_decay)
-        elif optimizer_type == 'SGD':
-            # We use the Stochastic Gradient Descent optimizer
-            optimizer = optim.SGD(net.parameters(), lr=lr, weight_decay=weight_decay)
-        else:
-            raise ValueError('Invalid optimizer type. Please choose either "Adam" or "SGD".')
-
-        # Define the best parameters
-        best_params = {
-            'batch_size': batch_size,
-            'lr': lr,
-            'weight_decay': weight_decay,
-            'epochs': epochs,
-            'dropout': dropout,
-            'lstm_hidden_s': lstm_hidden_s,
-            'fc1_hidden_s': fc1_hidden_s,
-            'reg': reg,
-        }
-
-        # Save the best parameters to a JSON file
-        save_best_params_to_json(best_params, classifier, id_number)
-    elif classifier == 'MLP_Torch':
-        # Step 1.6.4: Set training parameters for MLP. Subflowchart: MLP Subflowchart.
-        batch_size = TRAINING_PARAMS['batch_size']
-        lr = TRAINING_PARAMS['lr']
-        weight_decay = TRAINING_PARAMS['weight_decay']  # L2 regularization parameter
-        epochs = TRAINING_PARAMS['epochs']
-        input_dim = Xtrain.shape[1] * Xtrain.shape[2]  # Number of features in the input (5*32)
-        hidden_dim = TRAINING_PARAMS['hidden_dim']  # Example hidden dimension, can be adjusted
-        optimizer_type = TRAINING_PARAMS['optimizer_type']
-        reg = TRAINING_PARAMS['reg']
-        num_workers = TRAINING_PARAMS['num_workers']
-        logger.info(f'number of inputs: {input_dim}, hidden_dim: {hidden_dim}')
-        net = MLP(input_dim=input_dim, hidden_dim=hidden_dim)
-        if torch.cuda.is_available():
-            logger.info('Moving model to cuda')
-            net.cuda()
-        else:
-            logger.info('Model to cpu')
-        if optimizer_type == 'Adam':
-            # We use the Adam optimizer, a method for Stochastic Optimization
-            optimizer = optim.Adam(net.parameters(), lr=lr, weight_decay=weight_decay)
-        elif optimizer_type == 'SGD':
-            # We use the Stochastic Gradient Descent optimizer
-            optimizer = optim.SGD(net.parameters(), lr=lr, weight_decay=weight_decay)
-        else:
-            raise ValueError('Invalid optimizer type. Please choose either "Adam" or "SGD".')
-
-        # Define the best parameters
-        best_params = {
-            'batch_size': batch_size,
-            'lr': lr,
-            'weight_decay': weight_decay,
-            'epochs': epochs,
-            'hidden_dim': hidden_dim,
-            'reg': reg,
-        }
-
-        # Save the best parameters to a JSON file
-        save_best_params_to_json(best_params, classifier, id_number)
-    elif classifier == 'NNet':
-        # Step 1.6.4: Set training parameters for MLP. Subflowchart: MLP Subflowchart.
-        batch_size = TRAINING_PARAMS['batch_size']
-        lr = TRAINING_PARAMS['lr']
-        weight_decay = TRAINING_PARAMS['weight_decay']  # L2 regularization parameter
-        epochs = TRAINING_PARAMS['epochs']
-        dropout = TRAINING_PARAMS['dropout']
-        hidden_dim = TRAINING_PARAMS['hidden_dim']  # Example hidden dimension, can be adjusted
-        num_layers = TRAINING_PARAMS['num_layers']
-        optimizer_type = TRAINING_PARAMS['optimizer_type']
-        reg = TRAINING_PARAMS['reg']
-        num_workers = TRAINING_PARAMS['num_workers']
-        num_inputs = Xtrain.shape[2]  # Number of features in the input (32)
-        logger.info(f'number of inputs: {num_inputs}, hidden_dim: {hidden_dim}')
-        net = NNet(input_size=num_inputs, hidden_dim=hidden_dim, num_layers=num_layers, dropout=dropout)
-        if torch.cuda.is_available():
-            logger.info('Moving model to cuda')
-            net.cuda()
-        else:
-            logger.info('Model to cpu')
-        if optimizer_type == 'Adam':
-            # We use the Adam optimizer, a method for Stochastic Optimization
-            optimizer = optim.Adam(net.parameters(), lr=lr, weight_decay=weight_decay)
-        elif optimizer_type == 'SGD':
-            # We use the Stochastic Gradient Descent optimizer
-            optimizer = optim.SGD(net.parameters(), lr=lr, weight_decay=weight_decay)
-        else:
-            raise ValueError('Invalid optimizer type. Please choose either "Adam" or "SGD".')
-
-        # Define the best parameters
-        best_params = {
-            'batch_size': batch_size,
-            'lr': lr,
-            'weight_decay': weight_decay,
-            'epochs': epochs,
-            'hidden_dim': hidden_dim,
-            'num_layers': num_layers,
-            'reg': reg,
-        }
-
-        # Save the best parameters to a JSON file
-        save_best_params_to_json(best_params, classifier, id_number)
-    elif classifier == 'DenseNet':
-        # Step 1.6.4: Set training parameters for MLP. Subflowchart: MLP Subflowchart.
-        batch_size = TRAINING_PARAMS['batch_size']
-        lr = TRAINING_PARAMS['lr']
-        weight_decay = TRAINING_PARAMS['weight_decay']  # L2 regularization parameter
-        epochs = TRAINING_PARAMS['epochs']
-        hidden_size = TRAINING_PARAMS['hidden_size']  # Example hidden dimension, can be adjusted
-        optimizer_type = TRAINING_PARAMS['optimizer_type']
-        reg = TRAINING_PARAMS['reg']
-        num_workers = TRAINING_PARAMS['num_workers']
-        num_inputs = Xtrain.shape[1]
-        logger.info(f'number of inputs: {num_inputs}, hidden_size: {hidden_size} x {hidden_size}')
-        net = DenseNet(input_size=num_inputs, hidden_size=hidden_size)
-        if torch.cuda.is_available():
-            logger.info('Moving model to cuda')
-            net.cuda()
-        else:
-            logger.info('Model to cpu')
-        if optimizer_type == 'Adam':
-            # We use the Adam optimizer, a method for Stochastic Optimization
-            optimizer = optim.Adam(net.parameters(), lr=lr, weight_decay=weight_decay)
-        elif optimizer_type == 'SGD':
-            # We use the Stochastic Gradient Descent optimizer
-            optimizer = optim.SGD(net.parameters(), lr=lr, weight_decay=weight_decay)
-        else:
-            raise ValueError('Invalid optimizer type. Please choose either "Adam" or "SGD".')
-
-        # Define the best parameters
-        best_params = {
-            'batch_size': batch_size,
-            'lr': lr,
-            'weight_decay': weight_decay,
-            'epochs': epochs,
-            'hidden_size': hidden_size,
-            'num_layers': num_layers,
-            'reg': reg,
-        }
-
-        # Save the best parameters to a JSON file
-        save_best_params_to_json(best_params, classifier, id_number)
     ## ---------------------------- ##
     # Step x.2: Reshape the data for RandomForest: We jumped from Step 1.6.1, use third-party RandomForest library
     classifiers = [
@@ -1058,14 +1492,46 @@ def initialize_classification(*args):
         'ExtraTrees', 
         'GradientBoosting', 
         'NaiveBayes', 
-        'DBSCAN'
+        'DBSCAN',
+        'RGF'
     ]
     if classifier in classifiers and windowing == 1:
         Xtrain = Xtrain.reshape(Xtrain.shape[0], Xtrain.shape[1] * Xtrain.shape[2])
         Xtest = Xtest.reshape(Xtest.shape[0], Xtest.shape[1] * Xtest.shape[2])
+    return Xtrain, ytrain, Xtest, ytest
 
-    try:
-        # Parameters for TCN and LSTM networks
+def perform_classification(*args):
+    # Define parameter names and create a dictionary of params
+    param_names = [
+        'Xtrain', 'ytrain', 'Xtest', 'ytest',
+        'id_number', 'classifier', 'cuda_dev',
+        'search_method', 'enable_tuning', 'incremental_learning',
+        'transfer_learning', 'launch_dashboard', 'param_path'
+    ]
+
+    # Assign values directly from the dictionary
+    (
+        Xtrain, ytrain, Xtest, ytest,
+        id_number, classifier, CUDA_DEV,
+        search_method, enable_tuning, incremental_learning,
+        transfer_learning, launch_dashboard, param_path
+    ) = dict(zip(param_names, args)).values()
+
+    # Step 1.6: Classifier Selection: set training parameters
+    ####### CLASSIFIER PARAMETERS #######
+    if CUDA_DEV != 'None':
+        os.environ["CUDA_VISIBLE_DEVICES"] = CUDA_DEV
+
+    classifiers = [
+        'FPLSTM',
+        'NNet',
+        'TCN',
+        'DenseNet',
+        'MLP_Torch'
+    ]
+
+    if classifier in classifiers:
+        # Parameters for deep learning networks
         model_path = classification(
             X_train=Xtrain,
             Y_train=ytrain,
@@ -1073,17 +1539,13 @@ def initialize_classification(*args):
             Y_test=ytest,
             classifier=classifier,
             metric=['RMSE', 'MAE', 'FDR', 'FAR', 'F1', 'recall', 'precision'],
-            net=net,
-            optimizer=optimizer,
-            epochs=epochs,
-            batch_size=batch_size,
-            lr=lr,
-            reg=reg,
             id_number=id_number,
-            num_workers=num_workers
+            enable_tuning=enable_tuning,
+            incremental_learning=incremental_learning,
+            transfer_learning=transfer_learning
         )
-    except:
-        # Parameters for RandomForest
+    else:
+        # Parameters for traditional learning
         model_path = classification(
             X_train=Xtrain,
             Y_train=ytrain,
@@ -1093,7 +1555,8 @@ def initialize_classification(*args):
             # FDR, FAR, F1, recall, precision are not calculated for some algorithms, it will report as 0.0
             metric=['RMSE', 'MAE', 'FDR', 'FAR', 'F1', 'recall', 'precision'],
             search_method=search_method,
-            id_number=id_number
+            id_number=id_number,
+            launch_dashboard=launch_dashboard
         )
 
     return logger.get_log_file_path(), model_path, param_path

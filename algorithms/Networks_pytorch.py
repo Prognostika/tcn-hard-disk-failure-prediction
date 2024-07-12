@@ -10,7 +10,7 @@ from torch.utils.tensorboard import SummaryWriter
 from datetime import datetime
 import os
 import logger
-from torch.optim.lr_scheduler import ReduceLROnPlateau
+from torch.optim.lr_scheduler import ReduceLROnPlateau, ExponentialLR, StepLR
 from torch.autograd import grad
 from torch.utils.data import DataLoader
 from tqdm import tqdm
@@ -190,12 +190,30 @@ class MLP(nn.Module):
 
 class NNet(nn.Module):
     def __init__(self, input_size, hidden_dim=4, num_layers=1, dropout=0.1):
+        """
+        Initializes the Networks_pytorch class.
+
+        Args:
+            input_size (int): The size of the input.
+            hidden_dim (int, optional): The number of features in the hidden state. Defaults to 4.
+            num_layers (int, optional): Number of recurrent layers. Defaults to 1.
+            dropout (float, optional): Dropout probability. Defaults to 0.1.
+        """
         super().__init__()
         self.rnn = nn.LSTM(input_size=input_size, hidden_size=hidden_dim, num_layers=num_layers, dropout=dropout,
                            batch_first=True)
         self.linear = nn.Linear(hidden_dim, 2)
 
     def forward(self, input):
+        """
+        Performs the forward pass of the network.
+
+        Args:
+            input: The input tensor.
+
+        Returns:
+            out: The output tensor.
+        """
         _, (h_n, _) = self.rnn(input)
         repr_ = h_n[-1]
         out = self.linear(repr_)
@@ -203,6 +221,16 @@ class NNet(nn.Module):
 
 class DenseNet(nn.Module):
     def __init__(self, input_size, hidden_size=8):
+        """
+        Initializes a Networks_pytorch object.
+
+        Args:
+            input_size (int): The size of the input layer.
+            hidden_size (int or tuple): The size of the hidden layer(s). If a tuple is provided, it should contain two integers representing the sizes of the two hidden layers. Defaults to 8.
+
+        Returns:
+            None
+        """
         hs1, hs2 = hidden_size
         super().__init__()
         self.layers = nn.Sequential(
@@ -212,6 +240,15 @@ class DenseNet(nn.Module):
         )
 
     def forward(self, input):
+        """
+        Performs a forward pass through the network.
+
+        Args:
+            input: The input tensor.
+
+        Returns:
+            The output tensor after passing through the network.
+        """
         out = self.layers(input)
         return out
 
@@ -298,7 +335,7 @@ class TCN_Network(nn.Module):
         self.FC1_BN = nn.BatchNorm1d(64)
         self.FC1_ReLU = nn.ReLU()
         self.FC1_dropout = nn.Dropout(0.5)
-        
+
         # Final Linear transformation from 64 units to 2 output units for binary classification.
         self.GwayFC = nn.Linear(64, 2)
 
@@ -369,7 +406,24 @@ class TCNDataset(torch.utils.data.Dataset):
         return (self.x_tensors[idx], self.y_tensors[idx])
 
 class UnifiedTrainer:
-    def __init__(self, model, optimizer, epochs, batch_size, lr, reg, id_number, model_type, num_workers):
+    def __init__(
+        self,
+        model,
+        optimizer,
+        epochs=100,
+        batch_size=128,
+        lr=0.001,
+        reg=1,
+        id_number=1,
+        model_type='TCN',
+        num_workers=4,
+        scheduler_type='ReduceLROnPlateau',
+        scheduler_factor=0.1,
+        scheduler_patience=10,
+        scheduler_step_size=30,
+        scheduler_gamma=0.9,
+        loss_function='CrossEntropy'
+    ):
         """
         Initialize the UnifiedTrainer with all necessary components.
 
@@ -383,6 +437,12 @@ class UnifiedTrainer:
             id_number (int): The ID number of the model.
             model_type (str): The type of model ('LSTM', 'TCN', 'MLP').
             num_workers (int): Number of workers for the DataLoader.
+            scheduler_type (str): The type of scheduler ('ReduceLROnPlateau', 'ExponentialLR').
+            scheduler_factor (float): The factor for the scheduler.
+            scheduler_patience (int): The patience for the scheduler.
+            scheduler_step_size (int): The step size for the scheduler.
+            scheduler_gamma (float): The gamma for the scheduler.
+            loss_function (str): The loss function to use for training.
         """
         self.model = model
         self.optimizer = optimizer
@@ -394,9 +454,22 @@ class UnifiedTrainer:
         self.model_type = model_type
         self.num_workers = num_workers
         self.train_writer = SummaryWriter(f'runs/{model_type}_Training_Graph')
-        self.scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.1, patience=10)
+        if scheduler_type == 'ReduceLROnPlateau':
+            # factor is the factor by which the learning rate will be reduced. new_lr = lr * factor
+            # patience is the number of epochs with no improvement after which learning rate will be reduced
+            self.scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=scheduler_factor, patience=scheduler_patience)  # factor=0.1, patience=10
+        elif scheduler_type == 'ExponentialLR':
+            self.scheduler = ExponentialLR(optimizer, gamma=scheduler_gamma)  # gamma=0.9
+        elif scheduler_type == 'StepLR':
+            # step_size is the number of epochs after which the learning rate is multiplied by gamma.
+            # gamma is the factor by which the learning rate is multiplied after each step_size epochs.
+            self.scheduler = StepLR(optimizer, step_size=scheduler_step_size, gamma=1 - scheduler_gamma)  # step_size=30, gamma=0.1
+        else:
+            raise ValueError(f"Invalid scheduler_type: {scheduler_type}")
+        self.loss_function = loss_function
         self.test_writer = SummaryWriter(f'runs/{model_type}_Test_Graph')
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')  # Get the device
+        self.test_accuracy = 0  # Initialize test_accuracy
 
     def FPLSTM_collate(self, batch):
         """
@@ -448,7 +521,12 @@ class UnifiedTrainer:
         # Convert class weights to a CUDA tensor
         class_weights = torch.FloatTensor(weights).to(self.device)
         # We use the CrossEntropyLoss as loss function to guide the model towards making accurate predictions on the training data.
-        criterion = torch.nn.CrossEntropyLoss(weight=class_weights)
+        if self.loss_function == 'CrossEntropy':
+            criterion = torch.nn.CrossEntropyLoss(weight=class_weights)
+        elif self.loss_function == 'BCEWithLogits':
+            criterion = torch.nn.BCEWithLogitsLoss(weight=class_weights)
+        else:
+            raise ValueError(f"Invalid loss function: {self.loss_function}")
         predictions = np.zeros((len(train_loader.dataset), 2))  # Store the model's predictions
         true_labels = np.zeros(len(train_loader.dataset))  # Store the true labels
 
@@ -522,7 +600,12 @@ class UnifiedTrainer:
             None
         """
         self.model.eval()
-        criterion = torch.nn.CrossEntropyLoss()
+        if self.loss_function == 'CrossEntropy':
+            criterion = torch.nn.CrossEntropyLoss()
+        elif self.loss_function == 'BCEWithLogits':
+            criterion = torch.nn.BCEWithLogitsLoss()
+        else:
+            raise ValueError(f"Invalid loss function: {self.loss_function}")
         predictions = np.zeros((len(test_loader.dataset), 2))
         true_labels = np.zeros(len(test_loader.dataset))
     
@@ -555,6 +638,7 @@ class UnifiedTrainer:
         )
         print('\n')
         report_metrics(true_labels, predictions.argmax(axis=1), ['FDR', 'FAR', 'F1', 'recall', 'precision', 'ROC AUC'], self.test_writer, epoch)
+        self.test_accuracy = avg_test_acc  # Store test accuracy
         #return predictions.argmax(axis=1)
 
     def run(self, Xtrain, ytrain, Xtest, ytest):

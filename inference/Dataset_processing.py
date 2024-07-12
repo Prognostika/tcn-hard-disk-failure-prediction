@@ -4,12 +4,15 @@ import os
 from sklearn.preprocessing import MinMaxScaler
 import re
 import dask.dataframe as dd
+from tqdm import tqdm
+from statsmodels.tsa.holtwinters import ExponentialSmoothing
+
 
 class DatasetProcessing:
     """
         https://github.com/Prognostika/tcn-hard-disk-failure-prediction/wiki/Code_Process#partition-dataset-subflowchart
     """
-    def __init__(self, df, overlap=0, windowing=1, window_dim=5, days=7):
+    def __init__(self, df, overlap=0, windowing=1, window_dim=5, days=7, smoothing_level=0.5, augmentation_method='duplicate'):
         """
         Initialize the DatasetProcessing object.
         
@@ -19,6 +22,8 @@ class DatasetProcessing:
         - windowing (int): The windowing value (default: 1).
         - window_dim (int): The window dimension (default: 5).
         - days (int): The number of days (default: 7).
+        - smoothing_level (float): The smoothing level (default: 0.5).
+        - augmentation_method (str): The augmentation method (default: 'duplicate').
 
         """
         self.df = df
@@ -26,6 +31,8 @@ class DatasetProcessing:
         self.windowing = windowing
         self.window_dim = window_dim
         self.days = days
+        self.smoothing_level = smoothing_level
+        self.augmentation_method = augmentation_method
         self.script_dir = os.path.dirname(os.path.abspath(__file__))
         self.X = self.partition()
 
@@ -54,10 +61,23 @@ class DatasetProcessing:
         # Repeat the data until it reaches the required length
         if self.windowing == 1:
             group_sizes = self.days + self.window_dim
-            # If the length of the df is less than group_sizes, repeat the data until it reaches the required length
+            # If the length of the df is less than group_sizes
             if len(self.df) < group_sizes:
-                while len(self.df) < group_sizes:
-                    self.df = pd.concat([self.df, self.df], ignore_index=True)
+                if self.augmentation_method == 'duplicate':
+                    while len(self.df) < group_sizes:
+                        self.df = pd.concat([self.df, self.df], ignore_index=True)
+                elif self.augmentation_method == 'interpolate':
+                    # Calculate the interpolation factor
+                    interp_factor = group_sizes / len(self.df)
+
+                    # Create a new index for interpolation
+                    new_index = np.arange(0, len(self.df), 1/interp_factor)
+
+                    # Interpolate the data
+                    self.df = self.df.reindex(new_index).interpolate(method='index')
+                else:
+                    raise ValueError("Invalid method. Choose either 'duplicate' or 'interpolate'.")
+
                 # Trim the df to the required length
                 self.df = self.df.iloc[:group_sizes]
 
@@ -244,6 +264,12 @@ class DatasetProcessing:
 
         #########################
         df.drop(columns=['serial_number', 'date', 'model', 'capacity_bytes'], inplace=True)
+        
+        # TODO:
+        for col in tqdm(df.columns, desc="Processing columns", leave=False, unit="column", ncols=100):
+            if col.startswith('smart'):
+                df[col] = ExponentialSmoothing(df[col], trend=None, seasonal=None, seasonal_periods=None).fit(smoothing_level=self.smoothing_level).fittedvalues
+
         X = df.values   # X represents the smart features (ndarray)
 
         if self.windowing == 1:
