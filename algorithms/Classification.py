@@ -1207,7 +1207,7 @@ def initialize_classification(*args):
         'history_signal', 'classifier', 'features_extraction_method', 'cuda_dev',
         'ranking', 'num_features', 'overlap', 'split_technique', 'interpolate_technique',
         'search_method', 'fillna_method', 'pca_components', 'smoothing_level', 'incremental_learning', 'transfer_learning', 'partition_models',
-        'enable_tuning', 'enable_ga_algorithm', 'number_pop', 'number_gen', 'apply_weighted_feature', 'max_wavelet_scales'
+        'enable_tuning', 'enable_ga_algorithm', 'number_pop', 'number_gen', 'apply_weighted_feature', 'max_wavelet_scales',
         'launch_dashboard'
     ]
 
@@ -1288,7 +1288,6 @@ def initialize_classification(*args):
         df['validate_val'] = valid_list
 
         if ranking != 'None':
-            enable_ga_algorithm = True
             # Step 1.4: Feature Selection: Subflow chart of Main Classification Process
             # n_pop: Number of individuals in each generation
             # n_gen: Stop the genetic algorithm after certain generations
