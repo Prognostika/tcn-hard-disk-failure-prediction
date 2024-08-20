@@ -395,16 +395,16 @@ class DatasetPartitioner:
             DataFrame: A DataFrame where each cell contains the CWT result (complex coefficients) for that segment.
         """
         scales=np.arange(1, self.max_wavelet_scales)
+        cwt_results = {}
         # Applying CWT along the rows assuming each row is a time-windowed segment
         cwt_columns = [col for col in df.columns if 'smart' in col]  # Assuming SMART data columns start with 'smart'
         for col in tqdm(cwt_columns, desc="Processing columns", leave=False, unit="column", ncols=100):
-            # Extract the signal from the DataFrame
-            signal = df[col].values
             # Apply Continuous Wavelet Transform
-            coefficients, frequencies = pywt.cwt(signal, scales, wavelet)
+            coefficients, frequencies = pywt.cwt(df[col], scales, wavelet)
             # Store results: Magnitude of coefficients for simplicity in handling and visualization
-            df[col] = list(coefficients)  # Store as list of arrays (one per scale)
+            cwt_results[col] = list(coefficients)  # Store as list of arrays (one per scale)
 
+        cwt_df = pd.DataFrame(cwt_results)
         return df
 
     def apply_exponential_smoothing(self, df):
@@ -1082,7 +1082,6 @@ def feature_selection(df, num_features, test_type, enable_ga_algorithm, n_pop, n
 
     Returns:
         pandas.DataFrame: The dataframe with the selected features.
-        list: The list of selected features and the corresponding p-values.
     """
     if enable_ga_algorithm == True:
         y = df['predict_val']
@@ -1091,7 +1090,7 @@ def feature_selection(df, num_features, test_type, enable_ga_algorithm, n_pop, n
         selector = GeneticFeatureSelector(X, y, n_population=n_pop, n_generation=n_gen)
 
         logger.info("Running Genetic Algorithm for feature selection")
-        hof = selector.run_genetic_algorithm()
+        hof = selector.run_genetic_algorithm()      # hof represents the Hall of Fame (the best solution found by the genetic algorithm)
 
         accuracy, individual, header = selector.best_individual()
         logger.info(f'Best Accuracy: {accuracy}')
@@ -1144,7 +1143,7 @@ def feature_selection(df, num_features, test_type, enable_ga_algorithm, n_pop, n
             features = np.concatenate((features, np.asarray(feature).reshape(1,)))
     # Step 1.4.2.5: Update df to only include selected features
     df = df[features]
-    return df, features
+    return df
 
 if __name__ == '__main__':
     features = {

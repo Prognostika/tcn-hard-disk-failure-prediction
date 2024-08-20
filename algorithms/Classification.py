@@ -586,7 +586,7 @@ def classification(X_train, Y_train, X_test, Y_test, classifier, **args):
 
     elif classifier == 'TCN':
         # Step 1.7.6: Perform Classification using TCN. Subflowchart: TCN Subflowchart. Train and validate the network using TCN
-        data = (Xtrain, ytrain, Xtest, ytest)
+        data = (X_train, Y_train, X_test, Y_test)
 
         if args['enable_tuning']:
             config = {
@@ -669,7 +669,7 @@ def classification(X_train, Y_train, X_test, Y_test, classifier, **args):
 
     elif classifier == 'LSTM':
         # Step 1.7.7: Perform Classification using LSTM. Subflowchart: LSTM Subflowchart. Train and validate the network using LSTM
-        data = (Xtrain, ytrain, Xtest, ytest)
+        data = (X_train, Y_train, X_test, Y_test)
 
         if args['enable_tuning']:
             config = {
@@ -758,7 +758,7 @@ def classification(X_train, Y_train, X_test, Y_test, classifier, **args):
 
     elif classifier == 'NNet':
         # Step 1.7.7: Perform Classification using NNet. Subflowchart: NNet Subflowchart. Train and validate the network using NNet
-        data = (Xtrain, ytrain, Xtest, ytest)
+        data = (X_train, Y_train, X_test, Y_test)
 
         if args['enable_tuning']:
             config = {
@@ -843,7 +843,7 @@ def classification(X_train, Y_train, X_test, Y_test, classifier, **args):
 
     elif classifier == 'DenseNet':
         # Step 1.7.7: Perform Classification using LSTM. Subflowchart: LSTM Subflowchart. Train and validate the network using LSTM
-        data = (Xtrain, ytrain, Xtest, ytest)
+        data = (X_train, Y_train, X_test, Y_test)
 
         if args['enable_tuning']:
             config = {
@@ -926,7 +926,7 @@ def classification(X_train, Y_train, X_test, Y_test, classifier, **args):
             # Save the selected parameters to a JSON file
             save_best_params_to_json(config, classifier, args['id_number'])
     elif classifier == 'MLP_Torch':
-        data = (Xtrain, ytrain, Xtest, ytest)
+        data = (X_train, Y_train, X_test, Y_test)
         # Step 1.7.8: Perform Classification using MLP. Subflowchart: MLP Subflowchart. Train and validate the network using MLP
         if args['enable_tuning']:
             config = {
@@ -1207,7 +1207,7 @@ def initialize_classification(*args):
         'history_signal', 'classifier', 'features_extraction_method', 'cuda_dev',
         'ranking', 'num_features', 'overlap', 'split_technique', 'interpolate_technique',
         'search_method', 'fillna_method', 'pca_components', 'smoothing_level', 'incremental_learning', 'transfer_learning', 'partition_models',
-        'enable_tuning', 'enable_ga_algorithm', 'number_pop', 'number_gen', 'apply_weighted_feature', 'max_wavelet_scales'
+        'enable_tuning', 'enable_ga_algorithm', 'number_pop', 'number_gen', 'max_wavelet_scales',
         'launch_dashboard'
     ]
 
@@ -1218,7 +1218,7 @@ def initialize_classification(*args):
         history_signal, classifier, features_extraction_method, CUDA_DEV,
         ranking, num_features, overlap, split_technique, interpolate_technique,
         search_method, fillna_method, pca_components, smoothing_level, incremental_learning, transfer_learning, partition_models,
-        enable_tuning, enable_ga_algorithm, number_pop, number_gen, apply_weighted_feature, max_wavelet_scales,
+        enable_tuning, enable_ga_algorithm, number_pop, number_gen, max_wavelet_scales,
         launch_dashboard
     ) = dict(zip(param_names, args)).values()
     models = [m.strip() for m in model.split(',')]
@@ -1288,11 +1288,10 @@ def initialize_classification(*args):
         df['validate_val'] = valid_list
 
         if ranking != 'None':
-            enable_ga_algorithm = True
             # Step 1.4: Feature Selection: Subflow chart of Main Classification Process
             # n_pop: Number of individuals in each generation
             # n_gen: Stop the genetic algorithm after certain generations
-            df, feature_weights = feature_selection(df, num_features, test_type, enable_ga_algorithm, n_pop=number_pop, n_gen=number_gen)
+            df = feature_selection(df, num_features, test_type, enable_ga_algorithm, n_pop=number_pop, n_gen=number_gen)
         logger.info('Used features')
         for column in list(df):
             logger.info(f'{column:<27}.')
@@ -1327,7 +1326,7 @@ def initialize_classification(*args):
                 oversample_undersample, balancing_normal_failed, history_signal, 
                 classifier, features_extraction_method, ranking, num_features, 
                 overlap, split_technique, fillna_method, pca_components, smoothing_level,
-                apply_weighted_feature, feature_weights, max_wavelet_scales
+                max_wavelet_scales
             )
 
             # Perform classification for the relevant_df
@@ -1342,7 +1341,7 @@ def initialize_classification(*args):
                 oversample_undersample, balancing_normal_failed, history_signal, 
                 classifier, features_extraction_method, ranking, num_features, 
                 overlap, split_technique, fillna_method, pca_components, smoothing_level,
-                apply_weighted_feature, feature_weights, max_wavelet_scales
+                max_wavelet_scales
             )
 
             # Perform classification for the irrelevant_df
@@ -1357,7 +1356,7 @@ def initialize_classification(*args):
                 oversample_undersample, balancing_normal_failed, history_signal, 
                 classifier, features_extraction_method, ranking, num_features, 
                 overlap, split_technique, fillna_method, pca_components, smoothing_level,
-                apply_weighted_feature, feature_weights, max_wavelet_scales
+                max_wavelet_scales
             )
 
             # Perform classification for the irrelevant_df
@@ -1373,7 +1372,7 @@ def initialize_classification(*args):
                 oversample_undersample, balancing_normal_failed, history_signal, 
                 classifier, features_extraction_method, ranking, num_features, 
                 overlap, split_technique, fillna_method, pca_components, smoothing_level,
-                apply_weighted_feature, feature_weights, max_wavelet_scales
+                max_wavelet_scales
             )
 
         else:
@@ -1383,7 +1382,7 @@ def initialize_classification(*args):
                 oversample_undersample, balancing_normal_failed, history_signal, 
                 classifier, features_extraction_method, ranking, num_features, 
                 overlap, split_technique, fillna_method, pca_components, smoothing_level,
-                apply_weighted_feature, feature_weights, max_wavelet_scales
+                max_wavelet_scales
             )
 
         # Perform classification for the relevant_df
@@ -1391,23 +1390,6 @@ def initialize_classification(*args):
             classifier, CUDA_DEV, search_method, enable_tuning, incremental_learning, False,
             launch_dashboard, param_path
         )
-
-def apply_feature_weights(data, feature_weights):
-    """
-    Applies the feature weights to the input training data.
-
-    Args:
-        data (pd.DataFrame): The input training data.
-        feature_weights (dict): A dictionary with feature names as keys and their weights as values.
-
-    Returns:
-        pd.DataFrame: The weighted input training data.
-    """
-    if feature_weights is not None:
-        for feature, weight in feature_weights.items():
-            if feature in data.columns:
-                data[feature] *= weight
-    return data
 
 def initialize_partitioner(df, *args):
     # Define parameter names and create a dictionary of params
@@ -1417,7 +1399,7 @@ def initialize_partitioner(df, *args):
         'history_signal', 'classifier', 'features_extraction_method',
         'ranking', 'num_features', 'overlap', 'split_technique', 'interpolate_technique',
         'search_method', 'fillna_method', 'pca_components', 'smoothing_level',
-        'apply_weighted_feature', 'feature_weights', 'max_wavelet_scales'
+        'max_wavelet_scales'
     ]
 
     # Assign values directly from the dictionary
@@ -1427,7 +1409,7 @@ def initialize_partitioner(df, *args):
         history_signal, classifier, features_extraction_method,
         ranking, num_features, overlap, split_technique,
         fillna_method, pca_components, smoothing_level,
-        apply_weighted_feature, feature_weights, max_wavelet_scales
+        max_wavelet_scales
     ) = dict(zip(param_names, args)).values()
     ## -------- ##
     # random: stratified without keeping time order
@@ -1468,10 +1450,6 @@ def initialize_partitioner(df, *args):
             Xtest = feature_extraction_PCA(Xtest, pca_components)
         elif features_extraction_method == 'None':
             logger.info('Skipping features extraction for training data.')
-            if apply_weighted_feature == True:
-                # Apply feature weights to the training and testing data
-                Xtrain = apply_feature_weights(Xtrain, feature_weights)
-                Xtest = apply_feature_weights(Xtest, feature_weights)
         else:
             raise ValueError('Invalid features extraction method. Please choose either "custom" or "pca" or "None".')
         logger.info(f'Saving training and testing data to file: {model_string}_training_and_testing_data_{history_signal}_rank_{ranking}_{num_features}_overlap_{overlap}_features_extraction_method_{features_extraction_method}_oversample_undersample_{oversample_undersample}.npz')
